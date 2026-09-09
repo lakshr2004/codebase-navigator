@@ -73,24 +73,32 @@ def get_file_metadata(file_path: str):
         "extension": extension,
         "language": language_map.get(extension, "unknown"),
     }
+def create_document(file_path: str) -> dict:
+    metadata = get_file_metadata(file_path)
+    content = read_file(file_path)
 
+    return {
+        "content": content,
+        "metadata": metadata
+    }
+
+def load_repository(repository_path: str):
+    files = scan_repository(repository_path)
+
+    documents = []
+
+    for file_path in files:
+        document = create_document(file_path)
+        documents.append(document)
+
+    return documents
 
 if __name__ == "__main__":
     repository_path = "data/monetrik-financesystem"
 
-    files = scan_repository(repository_path)
+    documents = load_repository(repository_path)
 
-    print(f"Total files found: {len(files)}")
+    print(f"Total documents: {len(documents)}")
 
-    for file in files:
-        print(file)
-
-    print("\n--- First File Content ---\n")
-
-    content = read_file(files[0])
-    print(content)
-
-    metadata = get_file_metadata(files[0])
-
-    print("\n--- File Metadata ---\n")
-    print(metadata)
+    print("\n--- First Document ---\n")
+    print(documents[0])
