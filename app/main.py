@@ -1,4 +1,8 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+from services.repository_service import load_and_index_repository
+from retrieval.search import answer_query
+
 
 app = FastAPI(
     title="Codebase Navigator AI",
@@ -7,9 +11,94 @@ app = FastAPI(
 )
 
 
+class QueryRequest(BaseModel):
+    query: str
+
+
+class Source(BaseModel):
+    file: str
+    language: str
+    start_line: int | None = None
+    end_line: int | None = None
+    score: float
+
+
+class AskResponse(BaseModel):
+    query: str
+    answer: str
+    sources: list[Source]
+
+class RepositoryRequest(BaseModel):
+    repo_url: str
+
+
+class RepositoryResponse(BaseModel):
+    message: str
+    repository_path: str
 
 @app.get("/")
 def root():
     return {
         "message": "Codebase Navigator AI is running!"
     }
+
+
+@app.get("/health")
+def health():
+    return {
+        "status": "healthy"
+    }
+
+
+@app.post(
+    "/repositories/load",
+    response_model=RepositoryResponse
+)
+def load_repository(request: RepositoryRequest):
+
+    if not request.repo_url.strip():
+        raise HTTPException(
+            status_code=400,
+            detail="Repository URL cannot be empty"
+        )
+
+    try:
+        repository_path = load_and_index_repository(
+            request.repo_url
+        )
+
+        return {
+            "message": "Repository loaded and indexed successfully",
+            "repository_path": repository_path
+        }
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=str(e)
+        )
+
+
+@app.post("/ask", response_model=AskResponse)
+def ask(request: QueryRequest):
+
+    if not request.query.strip():
+        raise HTTPException(
+            status_code=400,
+            detail="Query cannot be empty"
+        )
+
+    try:
+        result = answer_query(request.query)
+
+        return {
+            "query": request.query,
+            "answer": result["answer"],
+            "sources": result["sources"]
+        }
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=str(e)
+        )    
