@@ -5,16 +5,32 @@ sys.path.append(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 )
 
-from rag.vector_store import client, COLLECTION_NAME
+from rag.vector_store import (
+    client,
+    get_collection_name
+)
+
 from rag.embeddings import generate_embedding
 from rag.generator import generate_answer
 
 
-def search_code(query: str, limit: int = 5):
+def search_code(
+    query: str,
+    repository_path: str,
+    limit: int = 5
+):
+    collection_name = get_collection_name(repository_path)
+
+    # Check whether repository has been indexed
+    if not client.collection_exists(collection_name):
+        raise ValueError(
+            f"Repository is not indexed: {repository_path}"
+        )
+
     query_vector = generate_embedding(query)
 
     results = client.query_points(
-        collection_name=COLLECTION_NAME,
+        collection_name=collection_name,
         query=query_vector,
         limit=limit,
     ).points
@@ -22,8 +38,23 @@ def search_code(query: str, limit: int = 5):
     return results
 
 
-def answer_query(query: str, limit: int = 5):
-    results = search_code(query, limit)
+def answer_query(
+    query: str,
+    repository_path: str,
+    limit: int = 5
+):
+    results = search_code(
+        query,
+        repository_path,
+        limit
+    )
+
+    # No relevant code found
+    if not results:
+        return {
+            "answer": "No relevant code was found in this repository.",
+            "sources": []
+        }
 
     context_parts = []
     sources = []
@@ -56,24 +87,12 @@ Code:
 
     context = "\n".join(context_parts)
 
-    answer = generate_answer(query, context)
+    answer = generate_answer(
+        query,
+        context
+    )
 
     return {
         "answer": answer,
         "sources": sources
     }
-
-
-if __name__ == "__main__":
-
-    query = "Where is authentication handled?"
-
-    result = answer_query(query)
-
-    print("\n--- Final Answer ---\n")
-    print(result["answer"])
-
-    print("\n--- Sources ---\n")
-
-    for source in result["sources"]:
-        print(source)

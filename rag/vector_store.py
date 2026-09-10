@@ -1,70 +1,147 @@
 import os
 import sys
+import uuid
 
 sys.path.append(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 )
-from qdrant_client import QdrantClient
-from qdrant_client.models import Distance, VectorParams, PointStruct
 
-from parser.chunker import chunk_documents
-from ingestion.scanner import load_repository
+from qdrant_client import QdrantClient
+from qdrant_client.models import (
+    Distance,
+    VectorParams,
+    PointStruct,
+    Filter,
+    FieldCondition,
+    MatchValue,
+)
+
 from rag.embeddings import generate_embedding
 
 
-COLLECTION_NAME = "codebase_chunks"
+BASE_COLLECTION_NAME = "codebase_chunks"
 
 client = QdrantClient(path="data/qdrant")
 
 
-def create_collection():
-    if not client.collection_exists(COLLECTION_NAME):
+def get_collection_name(repository_path: str) -> str:
+    """
+    Generate a unique Qdrant collection name for each repository.
+    """
+
+    repository_name = os.path.basename(
+        os.path.normpath(repository_path)
+    )
+
+    safe_name = "".join(
+        character.lower() if character.isalnum() else "_"
+        for character in repository_name
+    )
+
+    return f"{BASE_COLLECTION_NAME}_{safe_name}"
+
+
+def create_collection(repository_path: str):
+    """
+    Create a separate Qdrant collection for the repository.
+    """
+
+    collection_name = get_collection_name(repository_path)
+
+    if not client.collection_exists(collection_name):
+
         client.create_collection(
-            collection_name=COLLECTION_NAME,
+            collection_name=collection_name,
             vectors_config=VectorParams(
                 size=384,
                 distance=Distance.COSINE
             )
         )
 
+    return collection_name
 
-def insert_chunks(chunks):
+
+def delete_repository_chunks(repository_path: str):
+    """
+    Delete all existing vectors belonging to the repository.
+    """
+
+    collection_name = get_collection_name(repository_path)
+
+    if not client.collection_exists(collection_name):
+        return
+
+    client.delete(
+        collection_name=collection_name,
+        points_selector=Filter(
+            must=[
+                FieldCondition(
+                    key="repository_path",
+                    match=MatchValue(
+                        value=repository_path
+                    )
+                )
+            ]
+        )
+    )
+
+
+def insert_chunks(
+    chunks,
+    repository_path: str
+):
+    """
+    Generate embeddings and insert repository chunks
+    into its dedicated Qdrant collection.
+    """
+
+    collection_name = create_collection(
+        repository_path
+    )
+
+    # Remove old chunks before inserting fresh ones
+    delete_repository_chunks(
+        repository_path
+    )
+
     points = []
 
     for index, chunk in enumerate(chunks):
-        vector = generate_embedding(chunk["content"])
+
+        vector = generate_embedding(
+            chunk["content"]
+        )
+
+        # Deterministic unique ID
+        chunk_id = str(
+            uuid.uuid5(
+                uuid.NAMESPACE_URL,
+                f"{repository_path}:{index}"
+            )
+        )
 
         points.append(
             PointStruct(
-                id=index,
+                id=chunk_id,
                 vector=vector,
                 payload={
                     "content": chunk["content"],
-                    "metadata": chunk["metadata"]
+                    "metadata": chunk["metadata"],
+                    "repository_path": repository_path
                 }
             )
         )
 
-    client.upsert(
-        collection_name=COLLECTION_NAME,
-        points=points
-    )
+    if points:
 
+        client.upsert(
+            collection_name=collection_name,
+            points=points
+        )
 
-if __name__ == "__main__":
-    repository_path = "data/monetrik-financesystem"
+    return collection_name
 
-    documents = load_repository(repository_path)
-    chunks = chunk_documents(documents)
+def collection_exists(repository_path: str) -> bool:
+    collection_name = get_collection_name(repository_path)
 
-    print(f"Total documents: {len(documents)}")
-    print(f"Total chunks: {len(chunks)}")
-
-    create_collection()
-
-    insert_chunks(chunks)
-
-    collection_info = client.get_collection(COLLECTION_NAME)
-
-    print("Vectors inserted successfully")
-    print("Stored vectors:", collection_info.points_count)
+    return client.collection_exists(collection_name)

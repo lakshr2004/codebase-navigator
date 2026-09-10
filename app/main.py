@@ -1,5 +1,6 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
+
 from services.repository_service import load_and_index_repository
 from retrieval.search import answer_query
 
@@ -13,6 +14,7 @@ app = FastAPI(
 
 class QueryRequest(BaseModel):
     query: str
+    repository_path: str
 
 
 class Source(BaseModel):
@@ -28,6 +30,7 @@ class AskResponse(BaseModel):
     answer: str
     sources: list[Source]
 
+
 class RepositoryRequest(BaseModel):
     repo_url: str
 
@@ -35,6 +38,7 @@ class RepositoryRequest(BaseModel):
 class RepositoryResponse(BaseModel):
     message: str
     repository_path: str
+
 
 @app.get("/")
 def root():
@@ -88,8 +92,17 @@ def ask(request: QueryRequest):
             detail="Query cannot be empty"
         )
 
+    if not request.repository_path.strip():
+        raise HTTPException(
+            status_code=400,
+            detail="Repository path cannot be empty"
+        )
+
     try:
-        result = answer_query(request.query)
+        result = answer_query(
+            request.query,
+            request.repository_path
+        )
 
         return {
             "query": request.query,
@@ -97,8 +110,14 @@ def ask(request: QueryRequest):
             "sources": result["sources"]
         }
 
+    except ValueError as e:
+        raise HTTPException(
+            status_code=404,
+            detail=str(e)
+        )
+
     except Exception as e:
         raise HTTPException(
             status_code=500,
-            detail=str(e)
-        )    
+            detail="Failed to process query"
+        )

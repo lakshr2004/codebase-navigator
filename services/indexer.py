@@ -10,7 +10,7 @@ from parser.chunker import chunk_documents
 from rag.vector_store import create_collection, insert_chunks
 
 
-def index_repository(repository_path):
+def index_repository(repository_path: str):
 
     documents = load_repository(repository_path)
 
@@ -20,8 +20,15 @@ def index_repository(repository_path):
 
     print(f"Total chunks: {len(chunks)}")
 
-    create_collection()
+    collection_name = create_collection(repository_path)
 
-    insert_chunks(chunks)
+    insert_chunks(
+        chunks,
+        repository_path
+    )
 
-    print("Repository indexed successfully")
+    print(
+        f"Repository indexed successfully: {collection_name}"
+    )
+
+    return collection_name
