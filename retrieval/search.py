@@ -13,8 +13,8 @@ from rag.embeddings import generate_embedding
 from rag.generator import generate_answer
 
 
-# Minimum similarity score required for a result
-SIMILARITY_THRESHOLD = 0.30
+# Minimum similarity score required
+SIMILARITY_THRESHOLD = 0.20
 
 
 def search_code(
@@ -22,30 +22,36 @@ def search_code(
     repository_path: str,
     limit: int = 5
 ):
+    """
+    Search the indexed repository using semantic similarity.
+    """
+
     collection_name = get_collection_name(repository_path)
 
-    # Check whether repository has been indexed
+    # Check if repository is indexed
     if not client.collection_exists(collection_name):
         raise ValueError(
             f"Repository is not indexed: {repository_path}"
         )
 
+    # Convert user query into embedding
     query_vector = generate_embedding(query)
 
+    # Search Qdrant
     results = client.query_points(
         collection_name=collection_name,
         query=query_vector,
-        limit=limit,
+        limit=limit
     ).points
 
-    # Remove weak / irrelevant matches
-    results = [
+    # Remove low-quality matches
+    relevant_results = [
         result
         for result in results
         if result.score >= SIMILARITY_THRESHOLD
     ]
 
-    return results
+    return relevant_results
 
 
 def answer_query(
@@ -53,16 +59,23 @@ def answer_query(
     repository_path: str,
     limit: int = 5
 ):
+    """
+    Retrieve relevant code and generate an AI answer.
+    """
+
     results = search_code(
-        query,
-        repository_path,
-        limit
+        query=query,
+        repository_path=repository_path,
+        limit=limit
     )
 
-    # No sufficiently relevant code found
+    # Nothing relevant found
     if not results:
         return {
-            "answer": "I couldn't find enough relevant information in the codebase.",
+            "answer": (
+                "I couldn't find enough relevant information "
+                "in the codebase."
+            ),
             "sources": []
         }
 
@@ -70,34 +83,53 @@ def answer_query(
     sources = []
 
     for result in results:
+
         payload = result.payload
 
-        metadata = payload["metadata"]
-        content = payload["content"]
+        if not payload:
+            continue
 
+        metadata = payload.get("metadata", {})
+        content = payload.get("content", "")
+
+        file_path = metadata.get(
+            "file_path",
+            "Unknown file"
+        )
+
+        language = metadata.get(
+            "language",
+            "unknown"
+        )
+
+        start_line = metadata.get("start_line")
+        end_line = metadata.get("end_line")
+
+        # Build context for LLM
         context_parts.append(
             f"""
-File: {metadata["file_path"]}
-
-Language: {metadata["language"]}
-
-Lines: {metadata.get("start_line")} - {metadata.get("end_line")}
+File: {file_path}
+Language: {language}
+Lines: {start_line} - {end_line}
 
 Code:
 {content}
 """
         )
 
+        # Build source information
         sources.append({
-            "file": metadata["file_path"],
-            "language": metadata["language"],
-            "start_line": metadata.get("start_line"),
-            "end_line": metadata.get("end_line"),
-            "score": result.score,
+            "file": file_path,
+            "language": language,
+            "start_line": start_line,
+            "end_line": end_line,
+            "score": result.score
         })
 
+    # Combine retrieved chunks
     context = "\n".join(context_parts)
 
+    # Generate final answer
     answer = generate_answer(
         query,
         context
