@@ -1,7 +1,13 @@
-import sys
 import os
+import sys
 
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.append(
+    os.path.dirname(
+        os.path.dirname(
+            os.path.abspath(__file__)
+        )
+    )
+)
 
 from ingestion.scanner import load_repository
 
@@ -12,20 +18,34 @@ def chunk_code(
     overlap: int = 5
 ) -> list[dict]:
 
+    if chunk_size <= 0:
+        raise ValueError("chunk_size must be greater than 0")
+
+    if overlap < 0:
+        raise ValueError("overlap cannot be negative")
+
+    if overlap >= chunk_size:
+        raise ValueError("overlap must be smaller than chunk_size")
+
     lines = content.splitlines()
 
     chunks = []
-
     start = 0
     chunk_index = 0
 
     while start < len(lines):
 
-        end = min(start + chunk_size, len(lines))
+        end = min(
+            start + chunk_size,
+            len(lines)
+        )
 
-        chunk_content = "\n".join(lines[start:end])
+        chunk_content = "\n".join(
+            lines[start:end]
+        )
 
         if chunk_content.strip():
+
             chunks.append({
                 "content": chunk_content,
                 "chunk_index": chunk_index,
@@ -41,8 +61,11 @@ def chunk_code(
         start = end - overlap
 
     return chunks
-    
-def chunk_documents(documents: list[dict]) -> list[dict]:
+
+
+def chunk_documents(
+    documents: list[dict]
+) -> list[dict]:
 
     chunks = []
 
@@ -55,7 +78,7 @@ def chunk_documents(documents: list[dict]) -> list[dict]:
 
         for chunk in code_chunks:
 
-            chunk_data = {
+            chunks.append({
                 "content": chunk["content"],
                 "metadata": {
                     **metadata,
@@ -63,9 +86,7 @@ def chunk_documents(documents: list[dict]) -> list[dict]:
                     "start_line": chunk["start_line"],
                     "end_line": chunk["end_line"]
                 }
-            }
-
-            chunks.append(chunk_data)
+            })
 
     return chunks
 
@@ -81,6 +102,6 @@ if __name__ == "__main__":
     print(f"Total documents: {len(documents)}")
     print(f"Total chunks: {len(chunks)}")
 
-    print("\n--- First Chunk ---\n")
-
-    print(chunks[0])
+    if chunks:
+        print("\n--- First Chunk ---\n")
+        print(chunks[0])

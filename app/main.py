@@ -3,6 +3,7 @@ from pydantic import BaseModel
 
 from services.repository_service import load_and_index_repository
 from retrieval.search import answer_query
+from rag.vector_store import list_repositories
 
 
 app = FastAPI(
@@ -52,6 +53,15 @@ def health():
     return {
         "status": "healthy"
     }
+
+class RepositoryInfo(BaseModel):
+    name: str
+    collection_name: str
+
+
+@app.get("/repositories", response_model=list[RepositoryInfo])
+def get_repositories():
+    return list_repositories()
 
 
 @app.post(

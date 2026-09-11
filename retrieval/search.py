@@ -9,9 +9,12 @@ from rag.vector_store import (
     client,
     get_collection_name
 )
-
 from rag.embeddings import generate_embedding
 from rag.generator import generate_answer
+
+
+# Minimum similarity score required for a result
+SIMILARITY_THRESHOLD = 0.30
 
 
 def search_code(
@@ -35,6 +38,13 @@ def search_code(
         limit=limit,
     ).points
 
+    # Remove weak / irrelevant matches
+    results = [
+        result
+        for result in results
+        if result.score >= SIMILARITY_THRESHOLD
+    ]
+
     return results
 
 
@@ -49,10 +59,10 @@ def answer_query(
         limit
     )
 
-    # No relevant code found
+    # No sufficiently relevant code found
     if not results:
         return {
-            "answer": "No relevant code was found in this repository.",
+            "answer": "I couldn't find enough relevant information in the codebase.",
             "sources": []
         }
 
@@ -60,8 +70,10 @@ def answer_query(
     sources = []
 
     for result in results:
-        metadata = result.payload["metadata"]
-        content = result.payload["content"]
+        payload = result.payload
+
+        metadata = payload["metadata"]
+        content = payload["content"]
 
         context_parts.append(
             f"""
@@ -72,7 +84,6 @@ Language: {metadata["language"]}
 Lines: {metadata.get("start_line")} - {metadata.get("end_line")}
 
 Code:
-
 {content}
 """
         )

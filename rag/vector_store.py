@@ -145,3 +145,37 @@ def collection_exists(repository_path: str) -> bool:
     collection_name = get_collection_name(repository_path)
 
     return client.collection_exists(collection_name)
+
+
+def list_repositories():
+    """
+    Return all repositories that have been indexed.
+    """
+
+    collections = client.get_collections().collections
+
+    repositories = []
+
+    for collection in collections:
+        collection_name = collection.name
+
+        if collection_name.startswith(BASE_COLLECTION_NAME + "_"):
+            repository_name = collection_name[
+                len(BASE_COLLECTION_NAME) + 1:
+            ]
+
+            repositories.append({
+                "name": repository_name,
+                "collection_name": collection_name
+            })
+
+    return repositories
+
+if __name__ == "__main__":
+    repository_path = "data/monetrik-financesystem"
+
+    collection_name = create_collection(repository_path)
+
+    print("Collection:", collection_name)
+    print("Exists:", collection_exists(repository_path))
+    print("Repositories:", list_repositories())
