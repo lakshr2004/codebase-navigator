@@ -35,40 +35,65 @@ def extract_routes(content: str) -> list[dict]:
 
             function_node = node.child_by_field_name("function")
 
-            if function_node and function_node.type == "member_expression":
+            if (
+                function_node
+                and function_node.type == "member_expression"
+            ):
 
-                property_node = function_node.child_by_field_name("property")
+                property_node = (
+                    function_node.child_by_field_name("property")
+                )
 
                 if property_node:
 
                     method = get_node_text(property_node)
 
-                    if method in ["get", "post", "put", "patch", "delete"]:
+                    if method in [
+                        "get",
+                        "post",
+                        "put",
+                        "patch",
+                        "delete"
+                    ]:
 
-                        arguments_node = node.child_by_field_name("arguments")
+                        arguments_node = (
+                            node.child_by_field_name("arguments")
+                        )
 
                         if arguments_node:
 
                             route = None
-                            arrow_function = None
+                            handler = None
 
                             for child in arguments_node.children:
 
                                 if child.type == "string":
-                                    route = get_node_text(child).strip('"')
+                                    route = (
+                                        get_node_text(child)
+                                        .strip('"')
+                                    )
 
-                                elif child.type == "arrow_function":
-                                    arrow_function = child
+                                elif child.type in [
+                                    "identifier",
+                                    "arrow_function",
+                                    "function"
+                                ]:
+                                    handler = child
 
-                            if arrow_function:
+                            if route and handler:
 
                                 routes.append({
                                     "type": "route",
                                     "method": method.upper(),
                                     "route": route,
-                                    "start_line": arrow_function.start_point.row + 1,
-                                    "end_line": arrow_function.end_point.row + 1,
-                                    "content": get_node_text(arrow_function)
+                                    "handler": get_node_text(handler),
+                                    "start_line": (
+                                        node.start_point.row + 1
+                                    ),
+                                    "end_line": (
+                                        node.end_point.row + 1
+                                    ),
+                                    "content": get_node_text(node)
                                 })
 
         for child in node.children:
