@@ -108,8 +108,24 @@ def insert_chunks(
 
     for index, chunk in enumerate(chunks):
 
+        metadata = chunk["metadata"]
+
+        # Include file metadata in embedding
+        # so file/path related queries work better.
+        embedding_text = f"""
+File: {metadata.get("filename", "")}
+
+Path: {metadata.get("file_path", "")}
+
+Language: {metadata.get("language", "")}
+
+Code:
+
+{chunk["content"]}
+"""
+
         vector = generate_embedding(
-            chunk["content"]
+            embedding_text
         )
 
         # Deterministic unique ID
@@ -140,6 +156,7 @@ def insert_chunks(
         )
 
     return collection_name
+
 
 def collection_exists(repository_path: str) -> bool:
     collection_name = get_collection_name(repository_path)
