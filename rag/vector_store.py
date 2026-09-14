@@ -3,7 +3,11 @@ import sys
 import uuid
 
 sys.path.append(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    os.path.dirname(
+        os.path.dirname(
+            os.path.abspath(__file__)
+        )
+    )
 )
 
 from qdrant_client import QdrantClient
@@ -21,7 +25,21 @@ from rag.embeddings import generate_embedding
 
 BASE_COLLECTION_NAME = "codebase_chunks"
 
-client = QdrantClient(path="data/qdrant")
+client = QdrantClient(
+    path="data/qdrant"
+)
+
+
+def normalize_repository_path(repository_path: str) -> str:
+    """
+    Normalize repository paths so Windows path variations
+    are treated consistently.
+    """
+    return os.path.normcase(
+        os.path.normpath(
+            os.path.abspath(repository_path)
+        )
+    )
 
 
 def get_collection_name(repository_path: str) -> str:
@@ -34,7 +52,9 @@ def get_collection_name(repository_path: str) -> str:
     )
 
     safe_name = "".join(
-        character.lower() if character.isalnum() else "_"
+        character.lower()
+        if character.isalnum()
+        else "_"
         for character in repository_name
     )
 
@@ -46,10 +66,13 @@ def create_collection(repository_path: str):
     Create a separate Qdrant collection for the repository.
     """
 
-    collection_name = get_collection_name(repository_path)
+    collection_name = get_collection_name(
+        repository_path
+    )
 
-    if not client.collection_exists(collection_name):
-
+    if not client.collection_exists(
+        collection_name
+    ):
         client.create_collection(
             collection_name=collection_name,
             vectors_config=VectorParams(
@@ -64,13 +87,22 @@ def create_collection(repository_path: str):
 def delete_repository_chunks(repository_path: str):
     """
     Delete all existing vectors belonging to the repository.
+
+    Since every repository has its own collection, deleting all
+    points from that collection is sufficient for a clean re-index.
     """
 
-    collection_name = get_collection_name(repository_path)
+    collection_name = get_collection_name(
+        repository_path
+    )
 
-    if not client.collection_exists(collection_name):
+    if not client.collection_exists(
+        collection_name
+    ):
         return
 
+    # Repository has a dedicated collection, so remove
+    # all existing points before re-indexing.
     client.delete(
         collection_name=collection_name,
         points_selector=Filter(
@@ -99,57 +131,138 @@ def insert_chunks(
         repository_path
     )
 
-    # Remove old chunks before inserting fresh ones
+    # Remove old vectors before inserting fresh data.
     delete_repository_chunks(
         repository_path
     )
 
     points = []
 
+    normalized_repository_path = normalize_repository_path(
+        repository_path
+    )
+
     for index, chunk in enumerate(chunks):
 
-        metadata = chunk["metadata"]
+        metadata = chunk.get(
+            "metadata",
+            {}
+        )
 
-        # Include file metadata in embedding
-        # so file/path related queries work better.
+        content = chunk.get(
+            "content",
+            ""
+        )
+
+        if not content.strip():
+            continue
+
+        # ------------------------------------------------
+        # Standard metadata
+        # ------------------------------------------------
+
+        filename = metadata.get(
+            "filename",
+            ""
+        )
+
+        file_path = metadata.get(
+            "file_path",
+            ""
+        )
+
+        relative_path = metadata.get(
+            "relative_path",
+            ""
+        )
+
+        language = metadata.get(
+            "language",
+            ""
+        )
+
+        extension = metadata.get(
+            "extension",
+            ""
+        )
+
+        # ------------------------------------------------
+        # Text used for embedding
+        #
+        # Include both metadata and source code so that
+        # semantic search can understand file/path context.
+        # ------------------------------------------------
+
         embedding_text = f"""
-File: {metadata.get("filename", "")}
+File: {filename}
 
-Path: {metadata.get("file_path", "")}
+Path: {relative_path}
 
-Language: {metadata.get("language", "")}
+Full Path: {file_path}
+
+Language: {language}
+
+Extension: {extension}
 
 Code:
-
-{chunk["content"]}
-"""
+{content}
+""".strip()
 
         vector = generate_embedding(
             embedding_text
         )
 
+        # ------------------------------------------------
         # Deterministic unique ID
+        # ------------------------------------------------
+
+        chunk_identifier = (
+            f"{normalized_repository_path}:"
+            f"{relative_path}:"
+            f"{metadata.get('chunk_index', index)}:"
+            f"{metadata.get('start_line', '')}:"
+            f"{metadata.get('end_line', '')}"
+        )
+
         chunk_id = str(
             uuid.uuid5(
                 uuid.NAMESPACE_URL,
-                f"{repository_path}:{index}"
+                chunk_identifier
             )
         )
+
+        # ------------------------------------------------
+        # Standardized payload
+        # ------------------------------------------------
+
+        payload_metadata = {
+            **metadata,
+
+            "filename": filename,
+            "file_path": file_path,
+            "relative_path": relative_path,
+            "language": language,
+            "extension": extension,
+            "repository_path": repository_path,
+        }
 
         points.append(
             PointStruct(
                 id=chunk_id,
                 vector=vector,
                 payload={
-                    "content": chunk["content"],
-                    "metadata": chunk["metadata"],
-                    "repository_path": repository_path
+                    "content": content,
+                    "metadata": payload_metadata,
+                    "repository_path": repository_path,
                 }
             )
         )
 
-    if points:
+    # ------------------------------------------------
+    # Insert into Qdrant
+    # ------------------------------------------------
 
+    if points:
         client.upsert(
             collection_name=collection_name,
             points=points
@@ -158,10 +271,17 @@ Code:
     return collection_name
 
 
-def collection_exists(repository_path: str) -> bool:
-    collection_name = get_collection_name(repository_path)
+def collection_exists(
+    repository_path: str
+) -> bool:
 
-    return client.collection_exists(collection_name)
+    collection_name = get_collection_name(
+        repository_path
+    )
+
+    return client.collection_exists(
+        collection_name
+    )
 
 
 def list_repositories():
@@ -169,30 +289,58 @@ def list_repositories():
     Return all repositories that have been indexed.
     """
 
-    collections = client.get_collections().collections
+    collections = (
+        client.get_collections().collections
+    )
 
     repositories = []
 
+    prefix = BASE_COLLECTION_NAME + "_"
+
     for collection in collections:
+
         collection_name = collection.name
 
-        if collection_name.startswith(BASE_COLLECTION_NAME + "_"):
-            repository_name = collection_name[
-                len(BASE_COLLECTION_NAME) + 1:
-            ]
+        if not collection_name.startswith(
+            prefix
+        ):
+            continue
 
-            repositories.append({
-                "name": repository_name,
-                "collection_name": collection_name
-            })
+        repository_name = collection_name[
+            len(prefix):
+        ]
+
+        repositories.append({
+            "name": repository_name,
+            "collection_name": collection_name
+        })
 
     return repositories
 
+
 if __name__ == "__main__":
-    repository_path = "data/monetrik-financesystem"
 
-    collection_name = create_collection(repository_path)
+    repository_path = (
+        "data/monetrik-financesystem"
+    )
 
-    print("Collection:", collection_name)
-    print("Exists:", collection_exists(repository_path))
-    print("Repositories:", list_repositories())
+    collection_name = create_collection(
+        repository_path
+    )
+
+    print(
+        "Collection:",
+        collection_name
+    )
+
+    print(
+        "Exists:",
+        collection_exists(
+            repository_path
+        )
+    )
+
+    print(
+        "Repositories:",
+        list_repositories()
+    )

@@ -2,7 +2,11 @@ import os
 import sys
 
 sys.path.append(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    os.path.dirname(
+        os.path.dirname(
+            os.path.abspath(__file__)
+        )
+    )
 )
 
 from tree_sitter import Language, Parser
@@ -11,21 +15,80 @@ import tree_sitter_javascript as tsjavascript
 from ingestion.scanner import (
     scan_repository,
     read_file,
-    get_file_metadata
+    get_file_metadata,
 )
 
 
-JS_LANGUAGE = Language(tsjavascript.language())
+# ============================================================
+# Tree-sitter JavaScript Setup
+# ============================================================
+
+JS_LANGUAGE = Language(
+    tsjavascript.language()
+)
+
 parser = Parser(JS_LANGUAGE)
 
 
-def get_node_text(node):
-    return node.text.decode("utf-8")
+# ============================================================
+# Constants
+# ============================================================
 
+SUPPORTED_EXTENSIONS = {
+    ".js",
+    ".jsx",
+}
+
+SUPPORTED_HTTP_METHODS = {
+    "get",
+    "post",
+    "put",
+    "patch",
+    "delete",
+}
+
+
+# ============================================================
+# Helpers
+# ============================================================
+
+def get_node_text(node) -> str:
+    """
+    Safely convert a Tree-sitter node into UTF-8 text.
+    """
+
+    return node.text.decode(
+        "utf-8",
+        errors="replace"
+    )
+
+
+# ============================================================
+# Route Extraction
+# ============================================================
 
 def extract_routes(content: str) -> list[dict]:
+    """
+    Extract Express-style HTTP routes from JavaScript code.
 
-    tree = parser.parse(content.encode("utf-8"))
+    Supported:
+
+        app.get(...)
+        app.post(...)
+        app.put(...)
+        app.patch(...)
+        app.delete(...)
+
+        router.get(...)
+        router.post(...)
+        router.put(...)
+        router.patch(...)
+        router.delete(...)
+    """
+
+    tree = parser.parse(
+        content.encode("utf-8")
+    )
 
     routes = []
 
@@ -33,7 +96,11 @@ def extract_routes(content: str) -> list[dict]:
 
         if node.type == "call_expression":
 
-            function_node = node.child_by_field_name("function")
+            function_node = (
+                node.child_by_field_name(
+                    "function"
+                )
+            )
 
             if (
                 function_node
@@ -41,127 +108,259 @@ def extract_routes(content: str) -> list[dict]:
             ):
 
                 property_node = (
-                    function_node.child_by_field_name("property")
+                    function_node.child_by_field_name(
+                        "property"
+                    )
                 )
 
-                if property_node:
+                if not property_node:
+                    return
 
-                    method = get_node_text(property_node)
+                method = get_node_text(
+                    property_node
+                )
 
-                    if method in [
-                        "get",
-                        "post",
-                        "put",
-                        "patch",
-                        "delete"
-                    ]:
+                if method not in SUPPORTED_HTTP_METHODS:
+                    return
 
-                        arguments_node = (
-                            node.child_by_field_name("arguments")
-                        )
+                arguments_node = (
+                    node.child_by_field_name(
+                        "arguments"
+                    )
+                )
 
-                        if arguments_node:
+                if not arguments_node:
+                    return
 
-                            route = None
-                            handler = None
+                route = None
+                handler = None
 
-                            for child in arguments_node.children:
+                for child in arguments_node.named_children:
 
-                                if child.type == "string":
-                                    route = (
-                                        get_node_text(child)
-                                        .strip('"')
-                                    )
+                    # ----------------------------------------
+                    # Route path
+                    # ----------------------------------------
 
-                                elif child.type in [
-                                    "identifier",
-                                    "arrow_function",
-                                    "function"
-                                ]:
-                                    handler = child
+                    if child.type == "string":
 
-                            if route and handler:
+                        if route is None:
+                            route = (
+                                get_node_text(
+                                    child
+                                ).strip("\"'")
+                            )
 
-                                routes.append({
-                                    "type": "route",
-                                    "method": method.upper(),
-                                    "route": route,
-                                    "handler": get_node_text(handler),
-                                    "start_line": (
-                                        node.start_point.row + 1
-                                    ),
-                                    "end_line": (
-                                        node.end_point.row + 1
-                                    ),
-                                    "content": get_node_text(node)
-                                })
+                    # ----------------------------------------
+                    # Handler
+                    # ----------------------------------------
 
-        for child in node.children:
+                    elif child.type in {
+                        "identifier",
+                        "arrow_function",
+                        "function",
+                    }:
+
+                        handler = child
+
+                # --------------------------------------------
+                # Store route
+                # --------------------------------------------
+
+                if route and handler:
+
+                    routes.append({
+                        "type": "route",
+
+                        "method": method.upper(),
+
+                        "route": route,
+
+                        "handler": get_node_text(
+                            handler
+                        ),
+
+                        "start_line": (
+                            node.start_point.row + 1
+                        ),
+
+                        "end_line": (
+                            node.end_point.row + 1
+                        ),
+
+                        "content": get_node_text(
+                            node
+                        ),
+                    })
+
+        for child in node.named_children:
             walk(child)
 
-    walk(tree.root_node)
+    walk(
+        tree.root_node
+    )
 
     return routes
 
 
-def parse_repository(repository_path: str) -> list[dict]:
+# ============================================================
+# Repository Parser
+# ============================================================
 
-    files = scan_repository(repository_path)
+def parse_repository(
+    repository_path: str
+) -> list[dict]:
+    """
+    Parse JavaScript/JSX files from a repository
+    and extract structured route information.
+
+    Every parsed item inherits the standardized
+    metadata generated by scanner.py.
+    """
+
+    files = scan_repository(
+        repository_path
+    )
 
     parsed_items = []
 
     for file_path in files:
 
-        metadata = get_file_metadata(file_path)
+        metadata = get_file_metadata(
+            file_path,
+            repository_path
+        )
 
-        # Currently Tree-sitter JavaScript parser
-        # is being used for JS/JSX files only.
-        if metadata["extension"] not in [".js", ".jsx"]:
+        extension = metadata.get(
+            "extension",
+            ""
+        ).lower()
+
+        if extension not in SUPPORTED_EXTENSIONS:
             continue
 
-        content = read_file(file_path)
+        try:
 
-        routes = extract_routes(content)
+            content = read_file(
+                file_path
+            )
+
+        except (OSError, UnicodeDecodeError) as e:
+
+            print(
+                f"Skipping unreadable file: "
+                f"{file_path} | {e}"
+            )
+
+            continue
+
+        routes = extract_routes(
+            content
+        )
 
         for route in routes:
 
+            parsed_metadata = {
+                **metadata,
+
+                "type": route["type"],
+
+                "method": route["method"],
+
+                "route": route["route"],
+
+                "start_line": route["start_line"],
+
+                "end_line": route["end_line"],
+
+                "chunk_type": "ast",
+            }
+
             parsed_items.append({
                 "content": route["content"],
-                "metadata": {
-                    **metadata,
-                    "type": route["type"],
-                    "method": route["method"],
-                    "route": route["route"],
-                    "start_line": route["start_line"],
-                    "end_line": route["end_line"]
-                }
+
+                "metadata": parsed_metadata,
             })
 
     return parsed_items
 
 
+# ============================================================
+# Manual Test
+# ============================================================
+
 if __name__ == "__main__":
 
-    repository_path = "data/monetrik-financesystem"
+    repository_path = (
+        "data/monetrik-financesystem"
+    )
 
-    items = parse_repository(repository_path)
+    items = parse_repository(
+        repository_path
+    )
 
-    print(f"Total parsed items: {len(items)}")
+    print(
+        f"Total parsed items: {len(items)}"
+    )
 
     for item in items[:10]:
 
-        print("\n--- Parsed Item ---")
+        metadata = item["metadata"]
 
-        print("File:", item["metadata"]["file_path"])
-        print("Type:", item["metadata"]["type"])
-        print("Method:", item["metadata"]["method"])
-        print("Route:", item["metadata"]["route"])
         print(
-            "Lines:",
-            item["metadata"]["start_line"],
-            "-",
-            item["metadata"]["end_line"]
+            "\n--- Parsed Item ---"
         )
 
-        print("Content:")
-        print(item["content"])
+        print(
+            "File:",
+            metadata.get("file_path")
+        )
+
+        print(
+            "Relative Path:",
+            metadata.get("relative_path")
+        )
+
+        print(
+            "Repository:",
+            metadata.get("repository_path")
+        )
+
+        print(
+            "Language:",
+            metadata.get("language")
+        )
+
+        print(
+            "Type:",
+            metadata.get("type")
+        )
+
+        print(
+            "Method:",
+            metadata.get("method")
+        )
+
+        print(
+            "Route:",
+            metadata.get("route")
+        )
+
+        print(
+            "Handler:",
+            item["content"]
+        )
+
+        print(
+            "Lines:",
+            metadata.get("start_line"),
+            "-",
+            metadata.get("end_line")
+        )
+
+        print(
+            "Content:"
+        )
+
+        print(
+            item["content"]
+        )
