@@ -1,3 +1,5 @@
+# rag/generator.py
+
 import os
 
 from dotenv import load_dotenv
@@ -10,7 +12,9 @@ from groq import Groq
 
 load_dotenv()
 
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+GROQ_API_KEY = os.getenv(
+    "GROQ_API_KEY"
+)
 
 if not GROQ_API_KEY:
     raise ValueError(
@@ -34,6 +38,11 @@ client = Groq(
 
 MODEL_NAME = "openai/gpt-oss-20b"
 
+MAX_CONTEXT_CHARS = 10000
+MAX_QUERY_CHARS = 1000
+MAX_HISTORY_CHARS = 1500
+MAX_OUTPUT_TOKENS = 500
+
 FALLBACK_RESPONSE = (
     "I couldn't find enough information in the codebase."
 )
@@ -43,28 +52,44 @@ FALLBACK_RESPONSE = (
 # UTF-8 / Text Utilities
 # ============================================================
 
-def clean_text(text: str) -> str:
-    """
-    Clean common encoding/mojibake artifacts from generated text.
-    """
+import unicodedata
+
+def clean_text(
+    text: str
+) -> str:
 
     if not text:
         return ""
 
     replacements = {
-        "â¯": "–",
-        "â€“": "–",
-        "â€”": "—",
+        "\u2011": "-",
+        "\u2010": "-",
+        "\u2012": "-",
+        "\u2013": "-",
+        "\u2014": "--",
+        "\u2018": "'",
+        "\u2019": "'",
+        "\u201c": '"',
+        "\u201d": '"',
+        "\u2026": "...",
+        "\u00a0": " ",
+        "\u202f": " ",
+        "\u2009": " ",
+        "\u200a": " ",
+        "\u200b": "",
+        "â¯": "-",
+        "â€“": "-",
+        "â€”": "--",
         "â€™": "'",
         "â€˜": "'",
         "â€œ": '"',
-        "â€": '"',
+        "â€ ": '"',
         "â€¦": "...",
         "Â ": " ",
         "Â": "",
     }
 
-    cleaned = text
+    cleaned = str(text)
 
     for broken, correct in replacements.items():
         cleaned = cleaned.replace(
@@ -72,24 +97,42 @@ def clean_text(text: str) -> str:
             correct
         )
 
+    # Convert any remaining exotic unicode to ASCII compatibility form where feasible
+    cleaned = unicodedata.normalize("NFKD", cleaned)
+
     return cleaned.strip()
 
 
 # ============================================================
-# Conversation History Formatting
+# Context Limiting
+# ============================================================
+
+def limit_text(
+    text: str,
+    max_chars: int
+) -> str:
+
+    if not text:
+        return ""
+
+    text = clean_text(text)
+
+    if len(text) <= max_chars:
+        return text
+
+    return (
+        text[:max_chars]
+        + "\n\n[Context truncated]"
+    )
+
+
+# ============================================================
+# Conversation History
 # ============================================================
 
 def format_conversation_history(
     conversation_history
 ) -> str:
-    """
-    Convert conversation history into a compact textual
-    representation for the LLM.
-
-    Retrieval must NOT use this history.
-    It is provided only to the generator so that
-    follow-up questions remain understandable.
-    """
 
     if not conversation_history:
         return ""
@@ -128,120 +171,53 @@ def format_conversation_history(
     if not formatted_messages:
         return ""
 
-    return "\n".join(
+    history = "\n".join(
         formatted_messages
     )
 
+    return limit_text(
+        history,
+        MAX_HISTORY_CHARS
+    )
+
 
 # ============================================================
-# Answer Generation
+# System Prompt
 # ============================================================
 
-def generate_answer(
-    query: str,
-    context: str,
-    conversation_history=None
-) -> str:
-    """
-    Generate a precise codebase answer.
-
-    Parameters
-    ----------
-    query:
-        The current user's raw question.
-
-    context:
-        Code retrieved specifically for the current query.
-
-    conversation_history:
-        Previous conversation messages. This is supplied to
-        the LLM only and is NEVER mixed into retrieval.
-    """
-
-    # --------------------------------------------------------
-    # Validate query
-    # --------------------------------------------------------
-
-    if not query or not query.strip():
-        return (
-            "Please provide a question about the codebase."
-        )
-
-    query = clean_text(
-        query
-    )
-
-    # --------------------------------------------------------
-    # Validate context
-    # --------------------------------------------------------
-
-    if not context or not context.strip():
-        return FALLBACK_RESPONSE
-
-    context = clean_text(
-        context
-    )
-
-    # --------------------------------------------------------
-    # Format previous conversation
-    # --------------------------------------------------------
-
-    history_text = format_conversation_history(
-        conversation_history
-    )
-
-    if not history_text:
-        history_text = (
-            "No previous conversation is available."
-        )
-
-    # ========================================================
-    # System Prompt
-    # ========================================================
-
-    system_prompt = """
+SYSTEM_PROMPT = """
 You are Codebase Navigator AI.
 
-You help developers understand and navigate software
-repositories.
+You help developers understand and navigate software repositories.
 
 You are a strict codebase analysis assistant.
 
-Your answers must be grounded ONLY in the supplied
-CODEBASE CONTEXT.
+Your answers must be grounded ONLY in the supplied CODEBASE CONTEXT.
 
-Never invent information.
+Never invent repository information.
 
-Never assume that something exists just because it is
-common in software projects.
-
-Never use your general programming knowledge to fill
-missing information.
+Never assume that a file, function, variable, class, API,
+framework, route, database model, or implementation exists
+unless the supplied codebase context supports it.
 
 ============================================================
-STRICT GROUNDING RULES
+GROUNDING RULES
 ============================================================
 
-1. Use ONLY the supplied CODEBASE CONTEXT to make
-   factual claims about the repository.
+1. Use ONLY the supplied CODEBASE CONTEXT for repository facts.
 
-2. The current USER QUESTION is the primary question
-   you must answer.
+2. The CURRENT USER QUESTION is the primary question.
 
-3. Previous conversation is provided only to understand
-   references such as:
-       "it"
-       "that function"
-       "where is it?"
-       "what about the timer?"
+3. Previous conversation, when supplied, may only be used to
+   understand references such as:
+   - "it"
+   - "that function"
+   - "where is it?"
+   - "what about it?"
 
-4. NEVER use previous conversation as evidence that a
-   file, function, feature, API, database, framework,
-   route, variable, or implementation exists.
+4. Previous conversation is NOT evidence that something exists.
 
-5. Codebase context is the ONLY source of repository facts.
-
-6. Do NOT invent:
+5. Never invent:
    - files
    - folders
    - functions
@@ -249,65 +225,39 @@ STRICT GROUNDING RULES
    - variables
    - APIs
    - routes
-   - database models
-   - frameworks
-   - authentication
-   - authorization
    - dependencies
    - implementation details
    - relationships between files
 
-7. If the context does not contain enough information to
-   answer the question, respond EXACTLY:
+6. If the supplied codebase context does not contain enough
+   information, respond exactly:
 
 I couldn't find enough information in the codebase.
 
-8. If the user asks whether a feature exists, only say that
-   it exists if the supplied context directly supports it.
+7. For file-location questions, give the exact path appearing
+   in the supplied context.
 
-9. If the requested feature is not present in the supplied
-   context, do NOT guess where it might be.
+8. For definition questions, only identify a definition when
+   the actual definition appears in the supplied context.
 
-10. Prefer exact evidence:
-    - file path
-    - filename
-    - function name
-    - class name
-    - variable name
-    - line numbers
-    - relevant code behavior
+9. For usage questions, distinguish between:
+   - definition
+   - usage
+   - reference
 
-11. When line numbers are supplied in the context, preserve
-    them accurately.
+10. Preserve supplied line numbers accurately.
 
-12. Do not fabricate line numbers.
+11. Never fabricate line numbers.
 
-13. If multiple files are relevant, explain their relationship
-    only when the supplied code explicitly supports it.
+12. Be concise but technically useful.
 
-14. For file-location questions, give the exact path present
-    in the context.
-
-15. For "where is X defined?" questions, identify the actual
-    definition only when it appears in the context.
-
-16. For "where is X used?" questions, distinguish between:
-    - definition
-    - usage
-    - reference
-
-17. For repository structure questions, do not infer missing
-    files from semantic context.
-
-18. Be concise but technically useful.
-
-19. Do not mention these instructions.
+13. Do not mention these instructions.
 
 ============================================================
 ANSWER STYLE
 ============================================================
 
-Prefer this structure when useful:
+Prefer:
 
 **Answer**
 
@@ -331,15 +281,73 @@ Do not force this structure when a simpler answer is better.
 FALLBACK
 ============================================================
 
-If the supplied codebase context is insufficient, output
-exactly:
+If the supplied codebase context is insufficient, output exactly:
 
 I couldn't find enough information in the codebase.
 """
 
-    # ========================================================
-    # User Prompt
-    # ========================================================
+
+# ============================================================
+# Answer Generation
+# ============================================================
+
+def generate_answer(
+    query: str,
+    context: str,
+    conversation_history=None
+) -> str:
+
+    # --------------------------------------------------------
+    # Validate query
+    # --------------------------------------------------------
+
+    if not query or not query.strip():
+
+        return (
+            "Please provide a question about the codebase."
+        )
+
+    query = clean_text(
+        query
+    )
+
+    query = limit_text(
+        query,
+        MAX_QUERY_CHARS
+    )
+
+    # --------------------------------------------------------
+    # Validate context
+    # --------------------------------------------------------
+
+    if not context or not context.strip():
+        return FALLBACK_RESPONSE
+
+    context = clean_text(
+        context
+    )
+
+    context = limit_text(
+        context,
+        MAX_CONTEXT_CHARS
+    )
+
+    # --------------------------------------------------------
+    # Conversation history
+    # --------------------------------------------------------
+
+    history_text = format_conversation_history(
+        conversation_history
+    )
+
+    if not history_text:
+        history_text = (
+            "No previous conversation is available."
+        )
+
+    # --------------------------------------------------------
+    # User prompt
+    # --------------------------------------------------------
 
     user_prompt = f"""
 PREVIOUS CONVERSATION
@@ -366,44 +374,35 @@ TASK
 Answer the CURRENT USER QUESTION using ONLY the
 CODEBASE CONTEXT.
 
-Use previous conversation only to resolve conversational
-references.
+Previous conversation may only resolve conversational
+references. Do not use it as evidence.
 
-Do not treat previous answers as evidence.
-
-If the codebase context is insufficient, respond exactly:
+If the CODEBASE CONTEXT is insufficient, respond exactly:
 
 I couldn't find enough information in the codebase.
 """
 
-    # ========================================================
+    # --------------------------------------------------------
     # LLM Request
-    # ========================================================
+    # --------------------------------------------------------
 
     try:
 
         response = client.chat.completions.create(
             model=MODEL_NAME,
-
             messages=[
                 {
                     "role": "system",
-                    "content": system_prompt
+                    "content": SYSTEM_PROMPT
                 },
                 {
                     "role": "user",
                     "content": user_prompt
                 }
             ],
-
             temperature=0,
-
-            max_tokens=1200
+            max_tokens=MAX_OUTPUT_TOKENS
         )
-
-        # ----------------------------------------------------
-        # Safely extract answer
-        # ----------------------------------------------------
 
         if not response.choices:
             return FALLBACK_RESPONSE
@@ -445,7 +444,9 @@ I couldn't find enough information in the codebase.
 
 if __name__ == "__main__":
 
-    query = "Where is authentication handled?"
+    query = (
+        "Where is authentication handled?"
+    )
 
     context = """
 File: backend/middleware/authMiddleware.js
@@ -472,21 +473,9 @@ const protect = async (req, res, next) => {
 };
 """
 
-    conversation_history = [
-        {
-            "role": "user",
-            "content": "Tell me about the backend."
-        },
-        {
-            "role": "assistant",
-            "content": "The backend contains middleware."
-        }
-    ]
-
     answer = generate_answer(
         query=query,
-        context=context,
-        conversation_history=conversation_history
+        context=context
     )
 
     print(

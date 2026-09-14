@@ -33,6 +33,7 @@ SUPPORTED_EXTENSIONS = {
     ".scss",
     ".sass",
     ".less",
+    ".svg",
 
     # Data / Configuration
     ".json",
@@ -40,16 +41,40 @@ SUPPORTED_EXTENSIONS = {
     ".yml",
     ".toml",
     ".xml",
+    ".env.example",
 
     # Documentation
     ".md",
     ".mdx",
+    ".txt",
 
     # Shell
     ".sh",
 
     # Database
     ".sql",
+}
+
+SUPPORTED_FILENAMES = {
+    "dockerfile",
+    "makefile",
+    "requirements.txt",
+    "package.json",
+    ".gitignore",
+    ".dockerignore",
+    "license",
+    "gemfile",
+    "rakefile",
+    "cmakelists.txt",
+}
+
+BINARY_EXTENSIONS = {
+    ".png", ".jpg", ".jpeg", ".gif", ".ico", ".webp",
+    ".woff", ".woff2", ".ttf", ".eot", ".otf",
+    ".zip", ".tar", ".gz", ".7z", ".rar",
+    ".pdf", ".exe", ".dll", ".so", ".dylib", ".class", ".pyc", ".o", ".obj",
+    ".db", ".sqlite", ".sqlite3", ".bin", ".dat",
+    ".mp3", ".mp4", ".wav", ".avi", ".mov",
 }
 
 
@@ -73,6 +98,9 @@ IGNORED_DIRECTORIES = {
     ".next",
     ".nuxt",
     "target",
+    ".cache",
+    "bin",
+    "obj",
 }
 
 
@@ -108,6 +136,7 @@ LANGUAGE_MAP = {
     ".scss": "scss",
     ".sass": "sass",
     ".less": "less",
+    ".svg": "svg",
 
     # Data / Configuration
     ".json": "json",
@@ -119,12 +148,37 @@ LANGUAGE_MAP = {
     # Documentation
     ".md": "markdown",
     ".mdx": "markdown",
+    ".txt": "text",
 
     # Shell
     ".sh": "shell",
 
     # Database
     ".sql": "sql",
+}
+
+LANGUAGE_EXTENSION_MAP = {
+    "python": {".py"},
+    "javascript": {".js", ".jsx"},
+    "typescript": {".ts", ".tsx"},
+    "java": {".java"},
+    "cpp": {".cpp", ".hpp"},
+    "c": {".c", ".h"},
+    "go": {".go"},
+    "rust": {".rs"},
+    "html": {".html", ".htm"},
+    "css": {".css", ".scss", ".sass", ".less"},
+    "scss": {".scss"},
+    "sass": {".sass"},
+    "less": {".less"},
+    "json": {".json"},
+    "markdown": {".md", ".mdx"},
+    "yaml": {".yaml", ".yml"},
+    "shell": {".sh"},
+    "sql": {".sql"},
+    "toml": {".toml"},
+    "xml": {".xml"},
+    "svg": {".svg"},
 }
 
 
@@ -135,13 +189,11 @@ LANGUAGE_MAP = {
 def normalize_path(file_path: str) -> str:
     """
     Normalize a filesystem path.
-
-    This keeps path handling consistent across
-    Windows and other operating systems.
+    Consistently handles Windows and POSIX separators.
     """
-    return os.path.normpath(
-        os.path.abspath(file_path)
-    )
+    if not file_path:
+        return ""
+    return os.path.normpath(os.path.abspath(file_path))
 
 
 def get_relative_path(
@@ -149,20 +201,8 @@ def get_relative_path(
     repository_path: str
 ) -> str:
     """
-    Return a repository-relative path.
-
-    Example:
-
-        repository:
-            data/repos/Bubble-Game
-
-        file:
-            data/repos/Bubble-Game/script.js
-
-        result:
-            script.js
+    Return a repository-relative path with forward slashes '/'.
     """
-
     absolute_file = normalize_path(file_path)
     absolute_repository = normalize_path(repository_path)
 
@@ -174,66 +214,152 @@ def get_relative_path(
     return relative_path.replace("\\", "/")
 
 
+def is_binary_file(file_path: str) -> bool:
+    """
+    Check if a file is a binary file based on extension or quick chunk inspection.
+    """
+    extension = os.path.splitext(file_path)[1].lower()
+    if extension in BINARY_EXTENSIONS:
+        return True
+
+    if os.path.isfile(file_path):
+        try:
+            with open(file_path, "rb") as f:
+                chunk = f.read(1024)
+                if b"\x00" in chunk:
+                    return True
+        except OSError:
+            pass
+
+    return False
+
+
+def is_supported_file(file_path: str) -> bool:
+    """
+    Check if a file should be scanned and indexed.
+    """
+    filename = os.path.basename(file_path).lower()
+    if filename in SUPPORTED_FILENAMES:
+        return True
+
+    extension = os.path.splitext(filename)[1].lower()
+    if extension in BINARY_EXTENSIONS:
+        return False
+
+    return extension in SUPPORTED_EXTENSIONS
+
+
+def get_file_language(file_path: str) -> str:
+    """
+    Determine the programming or markup language of a file.
+    """
+    filename = os.path.basename(file_path).lower()
+    if filename == "dockerfile":
+        return "dockerfile"
+    if filename == "makefile":
+        return "makefile"
+
+    extension = os.path.splitext(filename)[1].lower()
+    return LANGUAGE_MAP.get(extension, "unknown")
+
+
 # ============================================================
-# Repository Scanner
+# Repository Scanner (Canonical Functions)
 # ============================================================
 
-def scan_repository(
+def get_repository_files(
     repository_path: str
 ) -> list[str]:
     """
-    Scan a repository and return all supported source files.
+    Canonical repository file scanner.
+    Returns relative paths (using '/') of all supported source/doc files,
+    ignoring .git, node_modules, virtualenvs, build dirs, and binary files.
     """
-
-    repository_path = normalize_path(
-        repository_path
-    )
-
-    if not os.path.exists(repository_path):
-        raise ValueError(
-            f"Repository does not exist: "
-            f"{repository_path}"
-        )
+    repository_path = normalize_path(repository_path)
 
     if not os.path.isdir(repository_path):
-        raise ValueError(
-            f"Repository path is not a directory: "
-            f"{repository_path}"
-        )
+        return []
 
     files = []
 
-    for root, directories, filenames in os.walk(
-        repository_path
-    ):
+    for root, directories, filenames in os.walk(repository_path):
         # Prevent traversal into ignored directories
         directories[:] = [
             directory
             for directory in directories
             if directory not in IGNORED_DIRECTORIES
+            and not directory.startswith(".git")
         ]
 
         for filename in filenames:
-            extension = os.path.splitext(
-                filename
-            )[1].lower()
+            absolute_path = os.path.join(root, filename)
 
-            if extension not in SUPPORTED_EXTENSIONS:
+            if not is_supported_file(filename):
                 continue
 
-            file_path = os.path.join(
-                root,
-                filename
-            )
+            if is_binary_file(absolute_path):
+                continue
 
-            files.append(
-                normalize_path(file_path)
-            )
+            relative_path = os.path.relpath(absolute_path, repository_path)
+            files.append(relative_path.replace("\\", "/"))
 
-    # Stable ordering makes indexing deterministic
-    files.sort()
+    return sorted(files)
 
-    return files
+
+def get_repository_folders(
+    repository_path: str
+) -> list[str]:
+    """
+    Returns relative directory paths (using '/') excluding ignored directories.
+    """
+    repository_path = normalize_path(repository_path)
+
+    if not os.path.isdir(repository_path):
+        return []
+
+    folders = set()
+
+    for root, directories, _ in os.walk(repository_path):
+        directories[:] = [
+            directory
+            for directory in directories
+            if directory not in IGNORED_DIRECTORIES
+            and not directory.startswith(".git")
+        ]
+
+        for directory in directories:
+            absolute_path = os.path.join(root, directory)
+            relative_path = os.path.relpath(absolute_path, repository_path)
+            folders.add(relative_path.replace("\\", "/"))
+
+    return sorted(folders)
+
+
+def scan_repository(
+    repository_path: str
+) -> list[str]:
+    """
+    Scan a repository and return absolute paths of all supported source files.
+    """
+    repository_path = normalize_path(repository_path)
+
+    if not os.path.exists(repository_path):
+        raise ValueError(
+            f"Repository does not exist: {repository_path}"
+        )
+
+    if not os.path.isdir(repository_path):
+        raise ValueError(
+            f"Repository path is not a directory: {repository_path}"
+        )
+
+    rel_files = get_repository_files(repository_path)
+    files = [
+        normalize_path(os.path.join(repository_path, f.replace("/", os.sep)))
+        for f in rel_files
+    ]
+
+    return sorted(files)
 
 
 # ============================================================
@@ -244,12 +370,8 @@ def read_file(
     file_path: str
 ) -> str:
     """
-    Read a source file using UTF-8.
-
-    errors='replace' prevents one malformed byte
-    from crashing the entire repository indexing process.
+    Read a source file using UTF-8 with errors='replace'.
     """
-
     try:
         with open(
             file_path,
@@ -258,11 +380,9 @@ def read_file(
             errors="replace"
         ) as file:
             return file.read()
-
     except OSError as e:
         raise ValueError(
-            f"Failed to read file "
-            f"{file_path}: {e}"
+            f"Failed to read file {file_path}: {e}"
         )
 
 
@@ -276,32 +396,11 @@ def get_file_metadata(
 ) -> dict:
     """
     Generate standardized metadata for a repository file.
-
-    Metadata includes:
-        filename
-        file_path
-        relative_path
-        language
-        extension
-        repository_path
     """
-
-    file_path = normalize_path(
-        file_path
-    )
-
-    filename = os.path.basename(
-        file_path
-    )
-
-    extension = os.path.splitext(
-        filename
-    )[1].lower()
-
-    language = LANGUAGE_MAP.get(
-        extension,
-        "unknown"
-    )
+    file_path = normalize_path(file_path)
+    filename = os.path.basename(file_path)
+    extension = os.path.splitext(filename)[1].lower()
+    language = get_file_language(filename)
 
     metadata = {
         "file_path": file_path,
@@ -313,26 +412,18 @@ def get_file_metadata(
     }
 
     if repository_path:
-        repository_path = normalize_path(
+        repository_path = normalize_path(repository_path)
+        metadata["repository_path"] = repository_path
+        metadata["relative_path"] = get_relative_path(
+            file_path,
             repository_path
-        )
-
-        metadata["repository_path"] = (
-            repository_path
-        )
-
-        metadata["relative_path"] = (
-            get_relative_path(
-                file_path,
-                repository_path
-            )
         )
 
     return metadata
 
 
 # ============================================================
-# Document Creation
+# Document Creation & Loading
 # ============================================================
 
 def create_document(
@@ -340,18 +431,13 @@ def create_document(
     repository_path: str | None = None
 ) -> dict:
     """
-    Create a document containing file content
-    and standardized metadata.
+    Create a document containing file content and standardized metadata.
     """
-
     metadata = get_file_metadata(
         file_path,
         repository_path
     )
-
-    content = read_file(
-        file_path
-    )
+    content = read_file(file_path)
 
     return {
         "content": content,
@@ -359,25 +445,14 @@ def create_document(
     }
 
 
-# ============================================================
-# Load Repository
-# ============================================================
-
 def load_repository(
     repository_path: str
 ) -> list[dict]:
     """
     Scan and load all supported repository files.
     """
-
-    repository_path = normalize_path(
-        repository_path
-    )
-
-    files = scan_repository(
-        repository_path
-    )
-
+    repository_path = normalize_path(repository_path)
+    files = scan_repository(repository_path)
     documents = []
 
     for file_path in files:
@@ -386,42 +461,8 @@ def load_repository(
                 file_path,
                 repository_path
             )
-
-            documents.append(
-                document
-            )
-
+            documents.append(document)
         except ValueError as e:
-            print(
-                f"Skipping file: {e}"
-            )
+            print(f"Skipping file: {e}")
 
     return documents
-
-
-# ============================================================
-# Manual Test
-# ============================================================
-
-if __name__ == "__main__":
-
-    repository_path = (
-        "data/monetrik-financesystem"
-    )
-
-    documents = load_repository(
-        repository_path
-    )
-
-    print(
-        f"Total documents: {len(documents)}"
-    )
-
-    if documents:
-        print(
-            "\n--- First Document ---\n"
-        )
-
-        print(
-            documents[0]
-        )

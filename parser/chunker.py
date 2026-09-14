@@ -36,14 +36,13 @@ def chunk_text(
     """
     Split source code into line-based chunks.
 
-    Each chunk contains:
-        content
-        start_line
-        end_line
-        chunk_index
+    Guarantees:
+    - 0-line content -> []
+    - 1..chunk_size lines -> exactly 1 chunk covering all lines
+    - > chunk_size lines -> overlapped chunks covering every line through the end
+    - exact 1-indexed start_line and end_line
     """
-
-    if not content.strip():
+    if not content or not content.strip():
         return []
 
     if chunk_size <= 0:
@@ -62,35 +61,40 @@ def chunk_text(
         )
 
     lines = content.splitlines()
+    total_lines = len(lines)
+
+    if total_lines == 0:
+        return []
+
+    if total_lines <= chunk_size:
+        return [{
+            "content": content,
+            "start_line": 1,
+            "end_line": total_lines,
+            "chunk_index": 0,
+        }]
 
     chunks = []
-
     start = 0
     chunk_index = 0
-
     step = chunk_size - chunk_overlap
 
-    while start + chunk_size <= len(lines):
-
-        end = min(
-            start + chunk_size,
-            len(lines)
-        )
-
-        chunk_content = "\n".join(
-            lines[start:end]
-        )
+    while start < total_lines:
+        end = min(start + chunk_size, total_lines)
+        chunk_content = "\n".join(lines[start:end])
 
         if chunk_content.strip():
-
             chunks.append({
                 "content": chunk_content,
                 "start_line": start + 1,
                 "end_line": end,
                 "chunk_index": chunk_index,
             })
+            chunk_index += 1
 
-        chunk_index += 1
+        if end >= total_lines:
+            break
+
         start += step
 
     return chunks
@@ -106,45 +110,13 @@ def chunk_documents(
     chunk_overlap: int = DEFAULT_CHUNK_OVERLAP,
 ) -> list[dict]:
     """
-    Convert loaded repository documents into
-    standardized code chunks.
-
-    Input:
-        documents = [
-            {
-                "content": "...",
-                "metadata": {...}
-            }
-        ]
-
-    Output:
-        [
-            {
-                "content": "...",
-                "metadata": {
-                    ...
-                    "chunk_type": "text",
-                    "chunk_index": 0,
-                    "start_line": 1,
-                    "end_line": 80
-                }
-            }
-        ]
+    Convert loaded repository documents into standardized code chunks.
     """
-
     chunks = []
 
     for document in documents:
-
-        content = document.get(
-            "content",
-            ""
-        )
-
-        metadata = document.get(
-            "metadata",
-            {}
-        )
+        content = document.get("content", "")
+        metadata = document.get("metadata", {})
 
         file_chunks = chunk_text(
             content,
@@ -153,23 +125,12 @@ def chunk_documents(
         )
 
         for chunk in file_chunks:
-
             chunk_metadata = {
                 **metadata,
-
                 "chunk_type": "text",
-
-                "chunk_index": chunk[
-                    "chunk_index"
-                ],
-
-                "start_line": chunk[
-                    "start_line"
-                ],
-
-                "end_line": chunk[
-                    "end_line"
-                ],
+                "chunk_index": chunk["chunk_index"],
+                "start_line": chunk["start_line"],
+                "end_line": chunk["end_line"],
             }
 
             chunks.append({
@@ -190,39 +151,20 @@ def chunk_repository(
     chunk_overlap: int = DEFAULT_CHUNK_OVERLAP,
 ) -> list[dict]:
     """
-    Scan a repository and convert supported source files
-    into standardized code chunks.
-
-    This function is mainly useful for standalone testing.
-
-    The main indexing pipeline should use:
-
-        load_repository()
-            ↓
-        chunk_documents()
+    Scan a repository and convert supported source files into standardized code chunks.
     """
-
     repository_path = os.path.abspath(
         os.path.normpath(repository_path)
     )
 
-    files = scan_repository(
-        repository_path
-    )
-
+    files = scan_repository(repository_path)
     documents = []
 
     for file_path in files:
-
         try:
-            content = read_file(
-                file_path
-            )
-
+            content = read_file(file_path)
         except ValueError as e:
-            print(
-                f"Skipping file: {e}"
-            )
+            print(f"Skipping file: {e}")
             continue
 
         metadata = get_file_metadata(
@@ -240,66 +182,3 @@ def chunk_repository(
         chunk_size=chunk_size,
         chunk_overlap=chunk_overlap,
     )
-
-
-# ============================================================
-# Manual Test
-# ============================================================
-
-if __name__ == "__main__":
-
-    repository_path = (
-        "data/monetrik-financesystem"
-    )
-
-    chunks = chunk_repository(
-        repository_path
-    )
-
-    print(
-        f"Total chunks: {len(chunks)}"
-    )
-
-    for chunk in chunks[:10]:
-
-        metadata = chunk["metadata"]
-
-        print("\n--- Chunk ---")
-
-        print(
-            "File:",
-            metadata.get("filename")
-        )
-
-        print(
-            "Relative Path:",
-            metadata.get("relative_path")
-        )
-
-        print(
-            "Language:",
-            metadata.get("language")
-        )
-
-        print(
-            "Chunk Type:",
-            metadata.get("chunk_type")
-        )
-
-        print(
-            "Chunk Index:",
-            metadata.get("chunk_index")
-        )
-
-        print(
-            "Lines:",
-            metadata.get("start_line"),
-            "-",
-            metadata.get("end_line")
-        )
-
-        print("Content:")
-
-        print(
-            chunk["content"]
-        )

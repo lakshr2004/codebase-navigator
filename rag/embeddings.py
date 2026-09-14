@@ -1,23 +1,42 @@
+import os
+import warnings
 from sentence_transformers import SentenceTransformer
 
+# Suppress unauthenticated HF Hub warning if desired
+warnings.filterwarnings("ignore", message=".*unauthenticated requests to the HF Hub.*")
 
 MODEL_NAME = "all-MiniLM-L6-v2"
 
-model = SentenceTransformer(MODEL_NAME)
+_embedding_model = None
+
+
+def get_embedding_model() -> SentenceTransformer:
+    global _embedding_model
+    if _embedding_model is None:
+        token = os.getenv("HF_TOKEN") or None
+        _embedding_model = SentenceTransformer(MODEL_NAME, token=token)
+    return _embedding_model
+
+
+class _ModelProxy:
+    def encode(self, *args, **kwargs):
+        return get_embedding_model().encode(*args, **kwargs)
+
+
+model = _ModelProxy()
 
 
 def generate_embedding(text: str) -> list[float]:
     """
     Generate a normalized embedding for a single text.
     """
-
     if not isinstance(text, str):
         raise TypeError("text must be a string")
 
     if not text.strip():
         raise ValueError("text cannot be empty")
 
-    embedding = model.encode(
+    embedding = get_embedding_model().encode(
         text,
         normalize_embeddings=True
     )
@@ -32,7 +51,6 @@ def generate_embeddings(
     """
     Generate normalized embeddings for multiple texts.
     """
-
     if not texts:
         return []
 
@@ -41,33 +59,10 @@ def generate_embeddings(
             "batch_size must be greater than 0"
         )
 
-    embeddings = model.encode(
+    embeddings = get_embedding_model().encode(
         texts,
         batch_size=batch_size,
         normalize_embeddings=True
     )
 
     return embeddings.tolist()
-
-
-if __name__ == "__main__":
-
-    text = "User authentication using JWT"
-
-    embedding = generate_embedding(text)
-
-    print("Embedding generated successfully")
-    print("Vector dimension:", len(embedding))
-    print("First 5 values:", embedding[:5])
-
-    texts = [
-        "User authentication using JWT",
-        "Movie booking API",
-        "Payment verification"
-    ]
-
-    embeddings = generate_embeddings(texts)
-
-    print("\nBatch embeddings generated successfully")
-    print("Number of embeddings:", len(embeddings))
-    print("Vector dimension:", len(embeddings[0]))
