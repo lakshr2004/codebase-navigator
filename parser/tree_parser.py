@@ -1,5 +1,6 @@
 import os
 import sys
+import logging
 
 sys.path.append(
     os.path.dirname(
@@ -28,6 +29,7 @@ JS_LANGUAGE = Language(
 )
 
 parser = Parser(JS_LANGUAGE)
+logger = logging.getLogger(__name__)
 
 
 # ============================================================
@@ -244,18 +246,16 @@ def parse_repository(
                 file_path
             )
 
-        except (OSError, UnicodeDecodeError) as e:
-
-            print(
-                f"Skipping unreadable file: "
-                f"{file_path} | {e}"
-            )
+        except (OSError, UnicodeDecodeError, ValueError) as e:
+            logger.warning("Skipping unreadable file %s: %s", file_path, e)
 
             continue
 
-        routes = extract_routes(
-            content
-        )
+        try:
+            routes = extract_routes(content)
+        except (TypeError, ValueError) as e:
+            logger.warning("Skipping malformed JavaScript file %s: %s", file_path, e)
+            continue
 
         for route in routes:
 

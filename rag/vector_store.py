@@ -1,4 +1,5 @@
 import atexit
+import logging
 import os
 import sys
 import uuid
@@ -23,12 +24,14 @@ from qdrant_client.models import (
 )
 
 from rag.embeddings import generate_embedding
+from core.config import get_runtime_config
 
 
 BASE_COLLECTION_NAME = "codebase_chunks"
 QDRANT_PATH = "data/qdrant"
 
 _client_instance = None
+logger = logging.getLogger(__name__)
 
 
 def get_client() -> QdrantClient:
@@ -37,8 +40,9 @@ def get_client() -> QdrantClient:
     """
     global _client_instance
     if _client_instance is None:
-        os.makedirs(QDRANT_PATH, exist_ok=True)
-        _client_instance = QdrantClient(path=QDRANT_PATH)
+        qdrant_path = get_runtime_config()["qdrant_path"]
+        os.makedirs(qdrant_path, exist_ok=True)
+        _client_instance = QdrantClient(path=qdrant_path)
     return _client_instance
 
 
@@ -156,15 +160,8 @@ def insert_chunks(
     Generate embeddings and insert repository chunks
     into its dedicated Qdrant collection.
     """
-    collection_name = create_collection(repository_path)
+    collection_name = get_collection_name(repository_path)
     qclient = get_client()
-
-    # Recreate or clear old collection points for clean reindex
-    try:
-        qclient.delete_collection(collection_name)
-    except Exception:
-        pass
-    create_collection(repository_path)
 
     points = []
     normalized_repository_path = normalize_repository_path(repository_path)
@@ -237,6 +234,13 @@ Code:
         )
 
     if points:
+        # Do not destroy a working index until all embeddings are available.
+        try:
+            qclient.delete_collection(collection_name)
+        except Exception:
+            pass
+        create_collection(repository_path)
+
         # Upsert in batches of 100
         batch_size = 100
         for i in range(0, len(points), batch_size):

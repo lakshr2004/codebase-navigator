@@ -1,5 +1,6 @@
 import os
 import sys
+import logging
 
 sys.path.append(
     os.path.dirname(
@@ -14,6 +15,9 @@ from ingestion.scanner import (
     read_file,
     get_file_metadata,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 # ============================================================
@@ -112,17 +116,37 @@ def chunk_documents(
     """
     Convert loaded repository documents into standardized code chunks.
     """
+    if chunk_size <= 0:
+        raise ValueError("chunk_size must be greater than 0")
+    if chunk_overlap < 0:
+        raise ValueError("chunk_overlap cannot be negative")
+    if chunk_overlap >= chunk_size:
+        raise ValueError("chunk_overlap must be smaller than chunk_size")
+
     chunks = []
 
     for document in documents:
+        if not isinstance(document, dict):
+            logger.warning("Skipping malformed repository document")
+            continue
+
         content = document.get("content", "")
         metadata = document.get("metadata", {})
+        if not isinstance(content, str):
+            logger.warning("Skipping repository document with non-text content")
+            continue
+        if not isinstance(metadata, dict):
+            metadata = {}
 
-        file_chunks = chunk_text(
-            content,
-            chunk_size=chunk_size,
-            chunk_overlap=chunk_overlap,
-        )
+        try:
+            file_chunks = chunk_text(
+                content,
+                chunk_size=chunk_size,
+                chunk_overlap=chunk_overlap,
+            )
+        except (TypeError, ValueError) as error:
+            logger.warning("Skipping malformed document chunk: %s", error)
+            continue
 
         for chunk in file_chunks:
             chunk_metadata = {
@@ -164,7 +188,7 @@ def chunk_repository(
         try:
             content = read_file(file_path)
         except ValueError as e:
-            print(f"Skipping file: {e}")
+            logger.warning("Skipping file %s: %s", file_path, e)
             continue
 
         metadata = get_file_metadata(

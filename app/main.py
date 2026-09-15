@@ -1,6 +1,7 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
+from core.config import validate_runtime_config
 from services.repository_service import load_and_index_repository
 from retrieval.search import answer_query
 from rag.vector_store import list_repositories
@@ -72,8 +73,25 @@ def root():
 @app.get("/health")
 def health():
     return {
-        "status": "healthy"
+        "status": "healthy",
+        "service": "codebase-navigator",
     }
+
+
+@app.get("/ready")
+def readiness():
+    try:
+        config = validate_runtime_config()
+        return {
+            "status": "ready",
+            "checks": {
+                "app_env": config["app_env"],
+                "groq_enabled": config["groq_enabled"],
+                "qdrant_enabled": config["qdrant_enabled"],
+            },
+        }
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
 
 
 # ============================================================

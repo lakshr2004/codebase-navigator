@@ -1,5 +1,6 @@
 import os
 import sys
+import logging
 
 sys.path.append(
     os.path.dirname(
@@ -13,6 +14,9 @@ from ingestion.scanner import load_repository
 from parser.chunker import chunk_documents
 from parser.tree_parser import parse_repository
 from rag.vector_store import create_collection, insert_chunks
+
+
+logger = logging.getLogger(__name__)
 
 
 def index_repository(repository_path: str):
@@ -65,9 +69,7 @@ def index_repository(repository_path: str):
         repository_path
     )
 
-    print(
-        f"Total documents: {len(documents)}"
-    )
+    logger.info("Repository documents discovered: %s", len(documents))
 
     if not documents:
         raise ValueError(
@@ -83,9 +85,7 @@ def index_repository(repository_path: str):
         documents
     )
 
-    print(
-        f"Total code chunks: {len(chunks)}"
-    )
+    logger.info("Repository text chunks created: %s", len(chunks))
 
     # --------------------------------------------------
     # Step 3: Parse JavaScript / JSX structure
@@ -95,9 +95,7 @@ def index_repository(repository_path: str):
         repository_path
     )
 
-    print(
-        f"Total parsed items: {len(parsed_items)}"
-    )
+    logger.info("Repository parsed items created: %s", len(parsed_items))
 
     # --------------------------------------------------
     # Step 4: Combine normal chunks + parsed items
@@ -107,9 +105,7 @@ def index_repository(repository_path: str):
         parsed_items
     )
 
-    print(
-        f"Total chunks after parsing: {len(chunks)}"
-    )
+    logger.info("Repository chunks after parsing: %s", len(chunks))
 
     if not chunks:
         raise ValueError(
@@ -125,9 +121,7 @@ def index_repository(repository_path: str):
         repository_path
     )
 
-    print(
-        f"Qdrant collection: {collection_name}"
-    )
+    logger.info("Qdrant collection selected: %s", collection_name)
 
     # --------------------------------------------------
     # Step 6: Generate embeddings and store chunks
@@ -138,17 +132,7 @@ def index_repository(repository_path: str):
         repository_path
     )
 
-    print(
-        f"Repository indexed successfully: "
-        f"{repository_path}"
-    )
-
-    print(
-        f"Collection: {collection_name}"
-    )
-
-    print(
-        f"Indexed chunks: {len(chunks)}"
-    )
+    logger.info("Repository indexed successfully: %s", repository_path)
+    logger.info("Indexed chunks: %s", len(chunks))
 
     return collection_name

@@ -12,24 +12,14 @@ from groq import Groq
 
 load_dotenv()
 
-GROQ_API_KEY = os.getenv(
-    "GROQ_API_KEY"
-)
-
-if not GROQ_API_KEY:
-    raise ValueError(
-        "GROQ_API_KEY is not configured. "
-        "Please add it to your .env file."
-    )
+GROQ_API_KEY = (os.getenv("GROQ_API_KEY") or "").strip() or None
 
 
 # ============================================================
 # Groq Client
 # ============================================================
 
-client = Groq(
-    api_key=GROQ_API_KEY
-)
+client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 
 
 # ============================================================
@@ -385,6 +375,9 @@ I couldn't find enough information in the codebase.
     # --------------------------------------------------------
     # LLM Request
     # --------------------------------------------------------
+
+    if client is None:
+        return FALLBACK_RESPONSE
 
     try:
 
