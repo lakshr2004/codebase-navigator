@@ -59,3 +59,11 @@ Build with `npm run build` and run browser checks with `npm run test:e2e`.
 The normal browser suite covers app load, validation, and live health/CORS
 integration. Live GitHub ingestion and Groq-backed RAG are intentionally not
 required by normal CI because they need external services or credentials.
+
+## Repository hygiene
+
+Backend dependencies are declared in `requirements.txt`. Frontend dependencies
+and the lockfile are owned by `frontend/package.json` and
+`frontend/package-lock.json`. Installed packages, Vite output, Playwright
+artifacts, Python caches, coverage output, logs, local Qdrant data, and runtime
+repository clones are generated or local-only and are excluded by `.gitignore`.
