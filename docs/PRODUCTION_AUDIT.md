@@ -79,7 +79,8 @@ private-repository, or GitHub authentication behavior.
 	validation, and live FastAPI health/CORS integration. Full browser ingestion,
 	exact-search, and Groq RAG flows remain NOT VERIFIED without a deterministic
 	local API fixture boundary.
-- Phase 2A cleanup removed only the accidental root npm lockfile and tracked
-	generated `frontend/node_modules` output. Backup modules and the standalone
-	`ingestion/github.py` helper remain preserved pending explicit review.
+- Phase 2A cleanup removed the accidental root npm lockfile, tracked generated
+	`frontend/node_modules` output, and four confirmed-unreferenced backup
+	implementations. The standalone `ingestion/github.py` helper remains because
+	it contains a `__main__` entry point and was not proven dead.
 - The application remains Beta / Needs Hardening.

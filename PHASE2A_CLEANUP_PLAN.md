@@ -26,12 +26,12 @@ None identified. Runtime-cloned repositories remain under ignored `data/` becaus
 
 | Path | Evidence | Reason not deleted in Phase 2A |
 |---|---|---|
-| `api/conversation_backup.py` | No repository references found; duplicates conversation behavior | Source file could be a manual recovery artifact; deletion requires explicit confirmation or history review |
-| `app/main_backup.py` | No repository references found; older API surface differs from current contract | Same ambiguity; no documented runtime reference |
-| `retrieval/search_backup.py` | No repository references found; older retrieval implementation | Same ambiguity; search behavior is safety-critical |
-| `retrieval/search.py.backup` | No repository references found | Same ambiguity; preserve regression history |
 | `ingestion/github.py` | No imports found, but contains a `__main__` entry point and standalone clone utility | Could be an undocumented CLI/manual workflow |
 | `data/` embedded repositories | Ignored and runtime/fixture dependent | Existing integration tests and local workflows reference repository data |
+
+The four backup implementations were subsequently removed after the user
+confirmed they were unwanted copies and the repository-wide reference audit
+found no runtime, test, script, configuration, or documentation references.
 
 ## DEPENDENCY AUDIT
 
