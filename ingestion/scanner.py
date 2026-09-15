@@ -344,6 +344,13 @@ def get_repository_files(repository_path: str) -> list[str]:
         "too_deep": 0,
         "duplicate": 0,
     }
+    discovered_files = 0
+    skipped_bytes = 0
+
+    def record_skip(reason: str, size: int = 0) -> None:
+        nonlocal skipped_bytes
+        skip_counts[reason] += 1
+        skipped_bytes += max(size, 0)
 
     max_directory_depth = int(config.get("max_directory_depth", 50))
 
@@ -360,32 +367,34 @@ def get_repository_files(repository_path: str) -> list[str]:
             directories[:] = []
 
         for filename in sorted(filenames):
+            discovered_files += 1
             absolute_path = normalize_path(os.path.join(root, filename))
 
             if _relative_depth(absolute_path, repository_path) > max_directory_depth:
-                skip_counts["too_deep"] += 1
+                record_skip("too_deep")
                 continue
             if os.path.islink(absolute_path):
-                skip_counts["symlink"] += 1
+                record_skip("symlink")
                 continue
             if not _is_within_repository(absolute_path, repository_path):
-                skip_counts["outside_root"] += 1
-                continue
-            if not is_supported_file(filename):
-                skip_counts["unsupported"] += 1
-                continue
-            if is_binary_file(absolute_path):
-                skip_counts["binary"] += 1
+                record_skip("outside_root")
                 continue
             try:
-                if os.path.getsize(absolute_path) > max_file_size:
-                    skip_counts["oversized"] += 1
-                    continue
+                file_size = os.path.getsize(absolute_path)
             except OSError:
-                skip_counts["unreadable_or_malformed"] += 1
+                record_skip("unreadable_or_malformed")
+                continue
+            if not is_supported_file(filename):
+                record_skip("unsupported", file_size)
+                continue
+            if is_binary_file(absolute_path):
+                record_skip("binary", file_size)
+                continue
+            if file_size > max_file_size:
+                record_skip("oversized", file_size)
                 continue
             if not _is_text_file_safe(absolute_path):
-                skip_counts["unreadable_or_malformed"] += 1
+                record_skip("unreadable_or_malformed", file_size)
                 continue
 
             relative_path = get_relative_path(absolute_path, repository_path)
@@ -394,15 +403,19 @@ def get_repository_files(repository_path: str) -> list[str]:
 
             real_path = os.path.normcase(os.path.realpath(absolute_path))
             if real_path in seen_real_paths:
-                skip_counts["duplicate"] += 1
+                record_skip("duplicate", file_size)
                 continue
 
             seen_real_paths.add(real_path)
             files.append(relative_path.replace("\\", "/"))
 
     logger.info(
-        "Repository scan summary: indexed=%d skipped=%s",
+        "Repository scan summary: files_discovered=%d files_indexed=%d "
+        "files_skipped=%d bytes_skipped=%d skipped_by_reason=%s",
+        discovered_files,
         len(files),
+        discovered_files - len(files),
+        skipped_bytes,
         {key: value for key, value in skip_counts.items() if value},
     )
     return sorted(files)

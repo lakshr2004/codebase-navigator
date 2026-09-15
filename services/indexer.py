@@ -1,6 +1,7 @@
 import os
 import sys
 import logging
+import time
 
 sys.path.append(
     os.path.dirname(
@@ -38,6 +39,9 @@ def index_repository(repository_path: str):
         Qdrant
     """
 
+    started_at = time.perf_counter()
+    logger.info("Repository indexing started")
+
     # --------------------------------------------------
     # Validate repository path
     # --------------------------------------------------
@@ -72,6 +76,7 @@ def index_repository(repository_path: str):
     logger.info("Repository documents discovered: %s", len(documents))
 
     if not documents:
+        logger.warning("Repository indexing stopped: no supported files")
         raise ValueError(
             f"No supported files found in repository: "
             f"{repository_path}"
@@ -108,6 +113,7 @@ def index_repository(repository_path: str):
     logger.info("Repository chunks after parsing: %s", len(chunks))
 
     if not chunks:
+        logger.warning("Repository indexing stopped: no indexable content")
         raise ValueError(
             f"No indexable content found in repository: "
             f"{repository_path}"
@@ -127,12 +133,17 @@ def index_repository(repository_path: str):
     # Step 6: Generate embeddings and store chunks
     # --------------------------------------------------
 
-    insert_chunks(
-        chunks,
-        repository_path
-    )
+    try:
+        insert_chunks(chunks, repository_path)
+    except Exception:
+        logger.exception("Repository indexing failed during vector insertion")
+        raise
 
     logger.info("Repository indexed successfully: %s", repository_path)
-    logger.info("Indexed chunks: %s", len(chunks))
+    logger.info(
+        "Repository indexing finished: chunks=%s duration_seconds=%.3f",
+        len(chunks),
+        time.perf_counter() - started_at,
+    )
 
     return collection_name

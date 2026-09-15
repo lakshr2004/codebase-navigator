@@ -28,7 +28,6 @@ from core.config import get_runtime_config
 
 
 BASE_COLLECTION_NAME = "codebase_chunks"
-QDRANT_PATH = "data/qdrant"
 
 _client_instance = None
 logger = logging.getLogger(__name__)
@@ -152,6 +151,34 @@ def delete_repository_chunks(repository_path: str):
     )
 
 
+def _delete_stale_points(qclient, collection_name: str, active_ids: set[str]) -> None:
+    """Remove completed-index points that are absent from the new source state."""
+    if not hasattr(qclient, "scroll"):
+        return
+
+    offset = None
+    while True:
+        records, offset = qclient.scroll(
+            collection_name=collection_name,
+            limit=1000,
+            offset=offset,
+            with_payload=False,
+            with_vectors=False,
+        )
+        stale_ids = [
+            record.id
+            for record in records
+            if str(record.id) not in active_ids
+        ]
+        if stale_ids:
+            qclient.delete(
+                collection_name=collection_name,
+                points_selector=stale_ids,
+            )
+        if not offset:
+            break
+
+
 def insert_chunks(
     chunks,
     repository_path: str
@@ -244,6 +271,18 @@ Code:
             qclient.upsert(
                 collection_name=collection_name,
                 points=points[i:i + batch_size]
+            )
+
+        try:
+            _delete_stale_points(
+                qclient,
+                collection_name,
+                {str(point.id) for point in points},
+            )
+        except Exception:
+            logger.warning(
+                "Stale vector cleanup failed; completed index remains usable",
+                exc_info=True,
             )
 
     return collection_name

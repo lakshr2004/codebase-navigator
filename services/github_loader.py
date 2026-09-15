@@ -3,9 +3,13 @@ import re
 import shutil
 import subprocess
 import tempfile
+import logging
 from pathlib import Path
 
 from core.config import get_runtime_config
+
+
+logger = logging.getLogger(__name__)
 
 
 REPOS_DIR = Path("data/repos")
@@ -61,6 +65,7 @@ def load_github_repo(repo_url: str) -> str:
     )
 
     temporary_path = Path(tempfile.mkdtemp(prefix=f".{destination_name}-", dir=REPOS_DIR))
+    logger.info("Starting GitHub repository clone")
 
     def remove_readonly(func, path, exc_info):
         os.chmod(path, 0o777)
@@ -85,15 +90,20 @@ def load_github_repo(repo_url: str) -> str:
         shutil.move(str(temporary_path), str(repo_path))
 
     except FileNotFoundError as e:
+        logger.error("Git executable was not found during repository clone")
         raise ValueError("Git executable was not found; install Git and retry") from e
     except subprocess.TimeoutExpired as e:
+        logger.error("GitHub repository clone timed out")
         raise ValueError("GitHub repository clone timed out") from e
     except subprocess.CalledProcessError as e:
+        logger.error("GitHub repository clone failed")
         raise ValueError("GitHub repository clone failed; check the URL and access permissions") from e
     except OSError as e:
+        logger.error("GitHub repository clone could not be completed")
         raise ValueError("GitHub repository clone could not be completed") from e
     finally:
         if temporary_path.exists():
             shutil.rmtree(temporary_path, onerror=remove_readonly)
 
+    logger.info("GitHub repository clone completed")
     return str(repo_path)

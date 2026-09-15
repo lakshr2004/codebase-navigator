@@ -32,6 +32,11 @@ the application logger. Invalid repository paths and empty supported content
 are fatal indexing errors. Git clone failures use temporary destinations and
 clean up partial clones.
 
+Re-indexing uses deterministic vector IDs, removes stale vectors only after all
+new vectors are uploaded successfully, and preserves the previous usable state
+when embedding or insertion fails. Scanner summaries include file and skipped
+byte counters without logging source contents or credentials.
+
 Private/authenticated GitHub repositories are not handled by the application
 itself. Use a credentialed Git environment outside this application or provide
 a public repository URL.
@@ -42,3 +47,15 @@ The repository is still Beta / Needs Hardening. Phase 1 hardening is tested
 locally, but symlink behavior requires CI coverage on an environment that can
 create symlinks, and live GitHub/network behavior is covered only through
 controlled subprocess tests.
+
+## Frontend
+
+The React/Vite/Tailwind frontend lives in `frontend/` and consumes the FastAPI
+contract documented in [API.md](API.md). Start it with `npm install` and
+`npm run dev` from that directory. Set `VITE_API_BASE_URL` when the API is not
+running at `http://127.0.0.1:8000`.
+
+Build with `npm run build` and run browser checks with `npm run test:e2e`.
+The normal browser suite covers app load, validation, and live health/CORS
+integration. Live GitHub ingestion and Groq-backed RAG are intentionally not
+required by normal CI because they need external services or credentials.
