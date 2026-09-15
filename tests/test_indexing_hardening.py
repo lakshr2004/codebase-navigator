@@ -70,7 +70,7 @@ def test_repeated_insertion_replaces_vectors_without_duplicate_ids(monkeypatch):
     first_ids = list(client.upserted_ids)
     vector_store.insert_chunks(_chunk(), "repo")
 
-    assert client.delete_calls == 2
+    assert client.delete_calls == 0
     assert client.upserted_ids == first_ids + first_ids
 
 

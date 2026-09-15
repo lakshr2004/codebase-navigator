@@ -32,6 +32,10 @@ the application logger. Invalid repository paths and empty supported content
 are fatal indexing errors. Git clone failures use temporary destinations and
 clean up partial clones.
 
+Private/authenticated GitHub repositories are not handled by the application
+itself. Use a credentialed Git environment outside this application or provide
+a public repository URL.
+
 ## Current status
 
 The repository is still Beta / Needs Hardening. Phase 1 hardening is tested

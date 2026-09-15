@@ -334,6 +334,16 @@ def get_repository_files(repository_path: str) -> list[str]:
     max_file_size = max(int(config.get("max_file_size_bytes", 10 * 1024 * 1024)), 1)
     files: list[str] = []
     seen_real_paths: set[str] = set()
+    skip_counts = {
+        "symlink": 0,
+        "outside_root": 0,
+        "unsupported": 0,
+        "binary": 0,
+        "oversized": 0,
+        "unreadable_or_malformed": 0,
+        "too_deep": 0,
+        "duplicate": 0,
+    }
 
     max_directory_depth = int(config.get("max_directory_depth", 50))
 
@@ -353,21 +363,29 @@ def get_repository_files(repository_path: str) -> list[str]:
             absolute_path = normalize_path(os.path.join(root, filename))
 
             if _relative_depth(absolute_path, repository_path) > max_directory_depth:
+                skip_counts["too_deep"] += 1
                 continue
             if os.path.islink(absolute_path):
+                skip_counts["symlink"] += 1
                 continue
             if not _is_within_repository(absolute_path, repository_path):
+                skip_counts["outside_root"] += 1
                 continue
             if not is_supported_file(filename):
+                skip_counts["unsupported"] += 1
                 continue
             if is_binary_file(absolute_path):
+                skip_counts["binary"] += 1
                 continue
             try:
                 if os.path.getsize(absolute_path) > max_file_size:
+                    skip_counts["oversized"] += 1
                     continue
             except OSError:
+                skip_counts["unreadable_or_malformed"] += 1
                 continue
             if not _is_text_file_safe(absolute_path):
+                skip_counts["unreadable_or_malformed"] += 1
                 continue
 
             relative_path = get_relative_path(absolute_path, repository_path)
@@ -376,11 +394,17 @@ def get_repository_files(repository_path: str) -> list[str]:
 
             real_path = os.path.normcase(os.path.realpath(absolute_path))
             if real_path in seen_real_paths:
+                skip_counts["duplicate"] += 1
                 continue
 
             seen_real_paths.add(real_path)
             files.append(relative_path.replace("\\", "/"))
 
+    logger.info(
+        "Repository scan summary: indexed=%d skipped=%s",
+        len(files),
+        {key: value for key, value in skip_counts.items() if value},
+    )
     return sorted(files)
 
 

@@ -234,11 +234,8 @@ Code:
         )
 
     if points:
-        # Do not destroy a working index until all embeddings are available.
-        try:
-            qclient.delete_collection(collection_name)
-        except Exception:
-            pass
+        # Upsert deterministic IDs in place so failed batches preserve the
+        # previously usable repository index.
         create_collection(repository_path)
 
         # Upsert in batches of 100

@@ -5,11 +5,14 @@
 The project remains **Beta / Needs Hardening**. Phase 1 implementation is
 substantially hardened but is not declared production-ready.
 
-Latest verification target:
+Latest verification:
 
-- Full suite: 79 passed, 1 skipped, 2 warnings before the current Phase 1 additions
-- Current work adds scanner, clone, and indexing regression coverage
-- Symlink tests are conditionally skipped when the host cannot create symlinks
+- Full suite: 103 passed, 5 skipped, 2 warnings
+- Ingestion hardening: 20 passed, 4 skipped
+- Full pipeline: 23 passed, 0 skipped
+- Phase 1 closure: 6 passed, 1 skipped
+- Performance checks: 2 passed
+- Integration: 1 passed
 
 ## Phase 1 policies
 
@@ -25,9 +28,9 @@ destination, clone into a temporary directory, enforce a timeout, and clean up
 failed clones. Clone error messages do not include repository URLs or process
 output.
 
-Indexing isolates malformed documents and chunks. Existing vectors are not
-deleted until all embeddings have been generated successfully. Re-indexing uses
-deterministic point IDs and replaces the repository collection.
+Indexing isolates malformed documents and chunks. Re-indexing uses deterministic
+point IDs and upserts in place, so an embedding or upsert failure does not delete
+the previously usable index. Removed source chunks are not yet garbage-collected.
 
 ## Configuration
 
@@ -59,7 +62,14 @@ private-repository, or GitHub authentication behavior.
 ## Remaining risks
 
 - Live GitHub/network behavior still needs CI or integration coverage.
-- Qdrant upsert failure after collection replacement can still leave a partial
-	new collection.
+- Re-indexing now upserts deterministic IDs in place, preserving the previous
+	index if embedding or upsert fails; stale vectors from removed source chunks
+	are not yet garbage-collected.
+- GitHub private/authenticated repositories are not supported by this loader;
+	callers must provide a credentialed Git environment or use a public repo.
 - Structured metrics and ingestion counters are not yet implemented.
+- Performance checks use a deterministic 200-file fixture and bounded file-count
+	checks; millions-of-files and 500 MB stress runs were not performed.
+- Four symlink tests and one real-permission test are environment-limited on the
+	current Windows host.
 - The application remains Beta / Needs Hardening.
