@@ -291,7 +291,7 @@ def parse_repository(
 if __name__ == "__main__":
 
     repository_path = (
-        "data/monetrik-financesystem"
+        "data/repos/monetrik"
     )
 
     items = parse_repository(

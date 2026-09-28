@@ -26,9 +26,11 @@ from ingestion.scanner import (
 # Configuration
 # ============================================================
 
-SIMILARITY_THRESHOLD = 0.05
-DEFAULT_LIMIT = 10
-MAX_CONTEXT_CHARS = 24000
+SIMILARITY_THRESHOLD = 0.04
+DEFAULT_LIMIT = 12
+SEMANTIC_RETRIEVAL_LIMIT = 60
+MAX_CONTEXT_CHARS = 36000
+CONCEPTUAL_MAX_RESULTS = 16
 
 LOCKFILE_NAMES = {
     "package-lock.json",
@@ -248,52 +250,156 @@ def is_file_location_query(
     return any(pattern in query_lower for pattern in patterns)
 
 
+# ============================================================
+# Code-Likeness Detection
+# ============================================================
+
+def is_code_like(
+    token: str
+) -> bool:
+    """
+    Return True if a token has structural evidence of being a code identifier
+    rather than a plain English word.
+
+    Evidence accepted:
+    - camelCase: at least one internal uppercase letter (e.g. handleSubmit)
+    - PascalCase: starts with uppercase and has >=2 chars (e.g. App, AuthContext)
+    - snake_case: contains at least one underscore between word chars (e.g. get_user)
+    - SCREAMING_SNAKE: all-caps with underscore (e.g. MAX_RETRIES)
+    - $ prefix (e.g. $jqueryObj)
+    - dotted/member notation (e.g. req.body, router.get)
+    - backtick-enclosed (handled before this call)
+    - CSS selector (#id notation handled before this call)
+
+    Plain lowercase single-word English tokens ("main", "game", "logic",
+    "authentication", "flow", "loop", "state") return False.
+    """
+    if not token:
+        return False
+
+    # $-prefixed jQuery/JS convention
+    if token.startswith("$"):
+        return True
+
+    # Dotted member access (req.body, router.get)
+    if "." in token:
+        return True
+
+    # Parentheses = function call notation
+    if "(" in token or ")" in token:
+        return True
+
+    # snake_case / SCREAMING_SNAKE: underscore between word chars
+    if re.search(r"[A-Za-z0-9]_[A-Za-z0-9]", token):
+        return True
+
+    # camelCase: starts lowercase, has at least one internal uppercase letter
+    if token[0].islower() and any(c.isupper() for c in token[1:]):
+        return True
+
+    # PascalCase: starts uppercase
+    # We accept single-word PascalCase (App, User, AuthContext) as identifiers
+    # since plain English words that start sentences are excluded by the
+    # surrounding caller context (we only reach here after stripping query verbs)
+    if token[0].isupper() and len(token) >= 2:
+        return True
+
+    # All other tokens: plain lowercase words — NOT code-like
+    return False
+
+
+def _extract_explicit_type_keyword_candidates(
+    query: str
+) -> list[str]:
+    """
+    Extract identifiers that are explicitly named with a type keyword.
+    Patterns: "function X", "class X", "component X", "method X",
+              "variable X", "const X", "interface X", "struct X"
+    These are always treated as code-like regardless of casing.
+    """
+    type_keyword_pattern = re.compile(
+        r"\b(?:function|class|method|component|variable|const|let|var|interface|struct|type|enum)\s+"
+        r"([A-Za-z_$][A-Za-z0-9_$]*)\b",
+        re.IGNORECASE,
+    )
+    return [m.group(1) for m in type_keyword_pattern.finditer(query)]
+
+
+def _extract_explicit_usages_candidates(
+    query: str
+) -> list[str]:
+    """
+    Extract tokens from explicit usage-request patterns:
+    "find all usages of X", "find usages of X", "find all references to X",
+    "references to X", "find X" (direct find command).
+    These tokens are treated as code-like regardless of casing because
+    the user is explicitly asking for a code-level search.
+    """
+    usage_patterns = [
+        r"\bfind\s+all\s+usages?\s+of\s+([A-Za-z_$#][A-Za-z0-9_$.\-]*)\b",
+        r"\bfind\s+all\s+references?\s+to\s+([A-Za-z_$#][A-Za-z0-9_$.\-]*)\b",
+        r"\busages?\s+of\s+([A-Za-z_$#][A-Za-z0-9_$.\-]*)\b",
+        r"\breferences?\s+to\s+([A-Za-z_$#][A-Za-z0-9_$.\-]*)\b",
+    ]
+    results = []
+    for pat in usage_patterns:
+        for m in re.finditer(pat, query, re.IGNORECASE):
+            token = m.group(1)
+            if token not in results:
+                results.append(token)
+    return results
+
+
 def is_identifier_query(
     query: str
 ) -> bool:
     """
-    Detect if the query is an exact identifier search/definition/usage/existence query.
-    Distinguishes exact identifier lookups from conceptual/explanatory questions.
+    Detect if the query is an exact identifier search/definition/usage/existence
+    query. Distinguishes exact identifier lookups from conceptual/explanatory
+    questions.
+
+    The key gate: even when query patterns suggest identifier mode (e.g.
+    "where is X defined"), we verify that at least one extracted candidate
+    is actually code-like (camelCase, PascalCase, snake_case, backtick-enclosed,
+    explicit type keyword, or explicit usages pattern).
+
+    Plain English multiword descriptions like "main game logic",
+    "authentication flow", "database connection" do NOT qualify as identifiers
+    and cause the query to fall through to semantic RAG.
     """
     query_lower = query.lower().strip()
 
-    # If query is asking for general repository file or folder structure
+    # 0. Repository structure/file queries are never identifier queries
     if is_repository_structure_query(query) or is_repository_file_query(query):
         return False
 
-    # Check for direct existence query for a specific identifier:
-    # "Does getRecordsBackup exist?", "Is there a getRecord identifier?", "Does increaseScore exist?"
+    # 1. Explicit existence patterns for a code symbol
+    #    "Does getRecordsBackup exist?", "Does increaseScore exist?"
     existence_patterns = [
         r"\bdoes\s+[`'\"]?([A-Za-z_$][A-Za-z0-9_$]*)[`'\"]?\s+exist\b",
-        r"\bis\s+there\s+(?:a\s+|an\s+)?[`'\"]?([A-Za-z_$][A-Za-z0-9_$]*)[`'\"]?\s+(?:identifier|function|class|variable|symbol|component)?\b",
+        r"\bis\s+there\s+(?:a\s+|an\s+)?[`'\"]?([A-Za-z_$][A-Za-z0-9_$]*)[`'\"]?"
+        r"\s+(?:identifier|function|class|variable|symbol|component)?\b",
         r"\b(?:check\s+if|see\s+if)\s+[`'\"]?([A-Za-z_$][A-Za-z0-9_$]*)[`'\"]?\s+exists?\b",
     ]
     for p in existence_patterns:
-        if re.search(p, query_lower):
-            return True
+        m = re.search(p, query_lower)
+        if m:
+            candidate = m.group(1)
+            # Even existence queries require a code-like candidate
+            if is_code_like(candidate):
+                return True
 
-    # Conceptual question prefixes that should route to semantic RAG
-    # unless explicitly asking for definition/location/usages
+    # 2. Conceptual prefixes → always semantic RAG unless they also contain
+    #    an explicit "where is X defined" sub-pattern with a code-like X
     conceptual_markers = [
-        "how does",
-        "how do",
-        "how to",
-        "how is",
-        "how can",
-        "why does",
-        "why is",
-        "why do",
-        "does this",
-        "does the",
+        "how does", "how do", "how to", "how is", "how can",
+        "why does", "why is", "why do",
+        "does this", "does the",
         "is there",
-        "explain",
-        "describe",
-        "overview of",
+        "explain", "describe", "overview of",
         "what does",
         "tell me about",
-        "kaise kaam",
-        "kaise karta",
-        "samjhao",
+        "kaise kaam", "kaise karta", "samjhao",
     ]
 
     is_conceptual = any(
@@ -302,46 +408,59 @@ def is_identifier_query(
     )
 
     if is_conceptual:
-        # Check if it has an explicit definition command like "where is X defined"
-        if not re.search(r"\b(?:where is|kaha defined|find all usages of)\b", query_lower):
+        # Conceptual queries only qualify as identifier queries if they also
+        # contain an explicit "where is / find all usages" sub-pattern AND
+        # the extracted candidate is code-like.
+        has_explicit_pattern = bool(
+            re.search(r"\b(?:where is|kaha defined|find all usages of)\b", query_lower)
+        )
+        if not has_explicit_pattern:
             return False
+        # Even if it has the pattern, still require a code-like candidate
+        candidates = extract_identifier_candidates(query)
+        return bool(candidates)
 
-    # Explicit identifier query patterns
-    patterns = [
-        "defined",
-        "definition",
-        "declare",
-        "declared",
-        "declaration",
-        "implemented",
-        "implementation",
-        "usage",
-        "usages",
-        "used",
-        "where is",
-        "where are",
-        "find all usages",
-        "find usages",
-        "find all references",
-        "references to",
-        "reference to",
-        "search for",
-        "search",
-        "find",
-        "kaha defined hai",
-        "kaha define",
-        "kaha implemented",
-        "kaha use hua",
-        "kaha use hota",
-        "ke usages",
-        "kaha par hai",
-        "kaha hai",
-        "dhundo",
-        "exist",
-        "exists",
+    # 3. For non-conceptual queries: check if the query matches an
+    #    identifier-mode pattern AND yields at least one code-like candidate.
+
+    # 3a. Explicit type-keyword candidates (always code-like)
+    if _extract_explicit_type_keyword_candidates(query):
+        return True
+
+    # 3b. Explicit usages-pattern candidates (always code-like by intent)
+    if _extract_explicit_usages_candidates(query):
+        return True
+
+    # 3c. Backtick/quote-enclosed symbols are always code-like
+    enclosed = re.findall(r"[`'\"]([A-Za-z_$][A-Za-z0-9_$]*)['\"`]", query)
+    if enclosed:
+        return True
+
+    # 3d. Identifier-mode trigger keywords present in query
+    identifier_trigger_patterns = [
+        "defined", "definition", "declare", "declared", "declaration",
+        "implemented", "implementation",
+        "usage", "usages", "used",
+        "where is", "where are",
+        "find all usages", "find usages", "find all references",
+        "references to", "reference to",
+        "search for", "search", "find",
+        "kaha defined hai", "kaha define", "kaha implemented",
+        "kaha use hua", "kaha use hota", "ke usages",
+        "kaha par hai", "kaha hai", "dhundo",
+        "exist", "exists",
     ]
 
-    return any(pattern in query_lower for pattern in patterns)
+    has_trigger = any(pat in query_lower for pat in identifier_trigger_patterns)
+    if not has_trigger:
+        return False
+
+    # 3e. CODE-LIKENESS GATE: only enter identifier mode if at least one
+    #     extracted candidate is structurally code-like.
+    #     This prevents "Where is the main game logic defined?" from
+    #     entering identifier mode just because "where is" + "defined" match.
+    candidates = extract_identifier_candidates(query)
+    return bool(candidates)
 
 
 def detect_identifier_intent(query: str) -> str:
@@ -430,11 +549,16 @@ def extract_identifier_candidates(
 ) -> list[str]:
     """
     Extract code identifiers and CSS selectors from query.
-    Preserves exact casing and handles camelCase, PascalCase, snake_case, $id, and #id.
+    Preserves exact casing and handles camelCase, PascalCase, snake_case, $id, #id.
+
+    IMPORTANT: Only structurally code-like tokens are returned.
+    Plain lowercase English words ("main", "game", "logic", "authentication",
+    "flow", "state", "loop") are excluded unless they appear in a privileged
+    context (backtick-enclosed or explicit type-keyword / usages pattern).
     """
     candidates = []
 
-    # 1. CSS selectors such as #pannel-bottom or #main-header
+    # Priority 1 — CSS selectors: #pannel-bottom, #main-header
     css_selectors = re.findall(
         r"#[A-Za-z_][A-Za-z0-9_\-]*",
         query
@@ -443,14 +567,30 @@ def extract_identifier_candidates(
         if selector not in candidates:
             candidates.append(selector)
 
-    # 2. Backtick or quote enclosed symbols
+    # Priority 2 — Backtick/quote enclosed symbols (always treated as code)
     enclosed = re.findall(r"[`'\"]([A-Za-z_$][A-Za-z0-9_$]*)['\"`]", query)
     for symbol in enclosed:
-        if symbol not in candidates:
+        if symbol not in candidates and symbol.lower() not in [c.lower() for c in candidates]:
             candidates.append(symbol)
 
-    # 3. Programming identifiers
-    identifiers = re.findall(
+    # Priority 3 — Explicit type-keyword named identifiers
+    #   "function handleSubmit", "class AuthContext", "component App"
+    for token in _extract_explicit_type_keyword_candidates(query):
+        if token not in candidates and token.lower() not in [c.lower() for c in candidates]:
+            candidates.append(token)
+
+    # Priority 4 — Explicit usages-pattern tokens
+    #   "find all usages of main", "find all references to socket"
+    #   Accepted regardless of casing because the user explicitly requests
+    #   a code-level search for that exact token.
+    for token in _extract_explicit_usages_candidates(query):
+        if token not in candidates and token.lower() not in [c.lower() for c in candidates]:
+            candidates.append(token)
+
+    # Priority 5 — Structurally code-like free tokens
+    #   Only accept tokens that pass the is_code_like() check.
+    #   This excludes plain lowercase English words.
+    raw_identifiers = re.findall(
         r"\b[A-Za-z_$][A-Za-z0-9_$]*\b",
         query
     )
@@ -459,7 +599,7 @@ def extract_identifier_candidates(
         c.lower() for c in extract_filename_candidates(query)
     }
 
-    # Common English and Hinglish stop words that are not code identifiers
+    # Stop words — query structure words that are never code identifiers
     stop_words = {
         "where", "what", "which", "how", "does", "do", "is", "are", "the",
         "a", "an", "in", "of", "to", "for", "on", "with", "and", "or",
@@ -480,21 +620,33 @@ def extract_identifier_candidates(
         "references", "referenced", "check", "see", "if",
     }
 
-    for identifier in identifiers:
+    for identifier in raw_identifiers:
         norm = identifier.lower()
 
+        # Skip structural stop words
         if norm in stop_words:
             continue
 
+        # Skip single-char tokens
         if len(identifier) < 2:
             continue
 
-        # If it matches a filename base or filename, skip
+        # Skip if already captured via a higher-priority path
+        if identifier in candidates or norm in [c.lower() for c in candidates]:
+            continue
+
+        # Skip filename-like tokens
         if norm in filename_candidates_lower:
             continue
 
-        if identifier not in candidates and norm not in [c.lower() for c in candidates]:
-            candidates.append(identifier)
+        # CODE-LIKENESS GATE:
+        # Plain all-lowercase words are excluded at this stage.
+        # They may only enter via backtick-enclosed (Priority 2) or
+        # explicit type-keyword / usages pattern (Priority 3/4).
+        if not is_code_like(identifier):
+            continue
+
+        candidates.append(identifier)
 
     return candidates
 
@@ -1184,6 +1336,187 @@ def diversify_results(
     return selected_results
 
 
+def _extract_recent_reference(conversation_context: str) -> str | None:
+    """
+    Extract the most recent concrete code/file reference from conversation
+    history. This is used only for follow-up query resolution; it does not
+    become a general semantic retrieval query.
+    """
+    if not conversation_context:
+        return None
+
+    recent = conversation_context[-8000:]
+
+    # Prefer explicit identifier references produced by our deterministic
+    # answers because these are the strongest signals for a follow-up.
+    patterns = [
+        r"Found definition\(s\) for\s+`([^`]+)`",
+        r"Found usages/references of\s+`([^`]+)`",
+        r"Found matches for\s+`([^`]+)`",
+        r"definition for\s+`([^`]+)`",
+        r"identifier\s+`([^`]+)`",
+        r"file\s+`([^`]+)`\s+is located",
+        r"file named\s+`([^`]+)`",
+    ]
+
+    for pattern in patterns:
+        matches = re.findall(pattern, recent, re.IGNORECASE)
+        if matches:
+            candidate = matches[-1].strip()
+            if candidate:
+                return candidate
+
+    # Fallback: use the last backtick-enclosed token that looks like a
+    # code symbol or a repository path.
+    enclosed = re.findall(r"`([^`]+)`", recent)
+    for candidate in reversed(enclosed):
+        candidate = candidate.strip()
+        if not candidate:
+            continue
+        if (
+            "/" in candidate
+            or "\\" in candidate
+            or "." in candidate
+            or is_code_like(candidate)
+        ):
+            return candidate
+
+    return None
+
+
+def resolve_follow_up_query(
+    query: str,
+    conversation_context: str = ""
+) -> str:
+    """
+    Resolve short contextual follow-ups into a standalone repository query.
+
+    Examples:
+        "Where is it located?" -> "Where is api.js located?"
+        "Where is it defined?" -> "Where is lockSeats defined?"
+        "Where is it used?"    -> "Where is lockSeats used?"
+
+    Only obvious reference-follow-ups are rewritten. Normal conceptual
+    questions remain untouched.
+    """
+    if not query or not conversation_context:
+        return query
+
+    q = query.strip()
+    q_lower = q.lower()
+
+    follow_up_patterns = [
+        r"\bwhere\s+is\s+(?:it|this|that)\s+(?:located|defined|implemented|used|declared)\b",
+        r"\bwhere\s+(?:can\s+i\s+)?find\s+(?:it|this|that)\b",
+        r"\bhow\s+(?:does|do)\s+(?:it|this|that)\s+work\b",
+        r"\bwhat\s+(?:does|is)\s+(?:it|this|that)\b",
+        r"\bwhere\s+(?:is|are)\s+(?:its|their)\s+(?:definition|usage|usages|references?)\b",
+        r"\b(?:show|find)\s+(?:it|this|that)\b",
+    ]
+
+    if not any(re.search(pattern, q_lower) for pattern in follow_up_patterns):
+        return query
+
+    reference = _extract_recent_reference(conversation_context)
+    if not reference:
+        return query
+
+    if re.search(r"\b(?:located|find)\b", q_lower):
+        return f"Where is `{reference}` located?"
+
+    if re.search(r"\b(?:defined|implemented|declared|definition)\b", q_lower):
+        return f"Where is `{reference}` defined?"
+
+    if re.search(r"\b(?:used|usage|usages|references?)\b", q_lower):
+        return f"Find all usages of `{reference}`"
+
+    if re.search(r"\bhow\s+(?:does|do)\b", q_lower):
+        return f"How does `{reference}` work?"
+
+    return f"What does `{reference}` do?"
+
+
+def is_conceptual_query(query: str) -> bool:
+    """Return True for questions that need architectural/semantic reasoning."""
+    q = query.lower().strip()
+
+    markers = [
+        "how does", "how do", "how is", "how are", "how can",
+        "why does", "why do", "why is", "why are",
+        "explain", "describe", "walk me through", "give me an overview",
+        "overview of", "architecture of", "flow of", "workflow of",
+        "how it works", "how this works",
+        "kaise kaam", "kaise work", "samjhao", "samjha",
+    ]
+
+    return any(marker in q for marker in markers)
+
+
+def expand_conceptual_query(query: str) -> str:
+    """
+    Add lightweight repository-search vocabulary without inventing facts.
+
+    This is only a retrieval aid. The final answer remains grounded in
+    retrieved repository code.
+    """
+    q = query.lower()
+    expansions = []
+
+    concept_aliases = {
+        "payment": ["payment", "order", "verify", "signature", "razorpay", "stripe"],
+        "payments": ["payment", "order", "verify", "signature", "razorpay", "stripe"],
+        "authentication": ["auth", "login", "register", "token", "jwt", "refresh token", "middleware"],
+        "auth": ["login", "register", "token", "jwt", "refresh token", "middleware"],
+        "seat locking": ["lockSeats", "unlockSeats", "redis", "socket", "seat-lock", "ttl"],
+        "seat lock": ["lockSeats", "unlockSeats", "redis", "socket", "seat-lock", "ttl"],
+        "booking": ["booking", "payment", "order", "seat", "razorpay"],
+        "redis": ["setnx", "ttl", "lock", "unlock", "seat-lock"],
+        "socket": ["socket.io", "disconnect", "lockSeats", "unlockSeats"],
+    }
+
+    for phrase, aliases in concept_aliases.items():
+        if phrase in q:
+            expansions.extend(aliases)
+
+    if expansions:
+        return f"{query}\nRetrieval terms: {' '.join(dict.fromkeys(expansions))}"
+
+    return query
+
+
+def _lexical_results_as_objects(
+    query: str,
+    repository_path: str,
+    limit: int = 20
+):
+    """Convert deterministic text matches into the payload shape used by RAG."""
+    from types import SimpleNamespace
+
+    lexical_matches = search_repository_text(query, repository_path)
+    results = []
+
+    for match in lexical_matches[:limit]:
+        payload = {
+            "content": match.get("content", ""),
+            "metadata": {
+                "relative_path": match.get("file", ""),
+                "file_path": match.get("file", ""),
+                "filename": os.path.basename(match.get("file", "")),
+                "language": match.get("language", "unknown"),
+                "start_line": match.get("start_line"),
+                "end_line": match.get("end_line"),
+            },
+        }
+        results.append(
+            SimpleNamespace(
+                payload=payload,
+                score=min(1.0, 0.5 + (float(match.get("score", 1.0)) * 0.05)),
+            )
+        )
+
+    return results
+
+
 def search_code(
     query: str,
     repository_path: str,
@@ -1206,8 +1539,9 @@ def search_code(
     if not client.collection_exists(collection_name):
         raise ValueError(f"Repository is not indexed: {repository_path}")
 
-    query_vector = generate_embedding(query)
-    retrieval_limit = max(limit * 5, 30)
+    retrieval_query = expand_conceptual_query(query) if is_conceptual_query(query) else query
+    query_vector = generate_embedding(retrieval_query)
+    retrieval_limit = max(limit * 5, SEMANTIC_RETRIEVAL_LIMIT)
 
     results = client.query_points(
         collection_name=collection_name,
@@ -1219,6 +1553,18 @@ def search_code(
         r for r in results
         if r.score >= SIMILARITY_THRESHOLD
     ]
+
+    # Semantic retrieval is primary. For conceptual questions, add a small
+    # deterministic lexical pass so important exact terms/files are not lost
+    # simply because their embedding score is lower.
+    if is_conceptual_query(query):
+        lexical_query = expand_conceptual_query(query)
+        lexical_results = _lexical_results_as_objects(
+            lexical_query,
+            repository_path,
+            limit=24,
+        )
+        relevant_results.extend(lexical_results)
 
     ranked_results = []
     for r in relevant_results:
@@ -1255,11 +1601,14 @@ def search_code(
             reverse=True
         )
         unique_results = [r for _, r in boosted_results]
-        diversified_results = diversify_results(unique_results, max_per_file=6)
+        max_per_file = 8 if is_conceptual_query(query) else 6
+        diversified_results = diversify_results(unique_results, max_per_file=max_per_file)
     else:
-        diversified_results = diversify_results(unique_results, max_per_file=3)
+        max_per_file = 5 if is_conceptual_query(query) else 3
+        diversified_results = diversify_results(unique_results, max_per_file=max_per_file)
 
-    return diversified_results[:limit]
+    result_limit = CONCEPTUAL_MAX_RESULTS if is_conceptual_query(query) else limit
+    return diversified_results[:result_limit]
 
 
 # ============================================================
@@ -1330,18 +1679,22 @@ def build_context(
 def answer_query(
     query: str,
     repository_path: str,
-    limit: int = DEFAULT_LIMIT
+    limit: int = DEFAULT_LIMIT,
+    mode: str = "auto",
+    conversation_context: str = "",
 ) -> dict:
     """
     Main entry point for repository querying.
 
-    Routing Strategy:
-    1. Repository structure queries
-    2. Language-specific file queries
-    3. Generic repository file listing queries
-    4. Exact filename location & existence queries
-    5. Exact identifier search & existence queries (NO RAG fallthrough on negative)
-    6. Semantic RAG for conceptual/understanding queries
+    Modes:
+        auto     -> choose deterministic lookup for identifier/file questions,
+                    semantic retrieval for conceptual questions.
+        exact    -> deterministic-first, with semantic fallback for concepts.
+        semantic -> skip identifier routing and use hybrid semantic retrieval.
+
+    The important design rule is that a failed exact identifier lookup must
+    NOT silently fall through to RAG, because that can produce a hallucinated
+    answer for a symbol that does not exist.
     """
     if not query or not query.strip():
         return {
@@ -1363,42 +1716,74 @@ def answer_query(
             "sources": []
         }
 
-    # 1. Repository Structure
-    if is_repository_structure_query(query):
+    mode = (mode or "auto").strip().lower()
+    if mode not in {"auto", "exact", "semantic"}:
+        mode = "auto"
+
+    # Resolve only obvious contextual follow-ups for repository retrieval.
+    # The original user question is preserved for answer generation.
+    retrieval_query = resolve_follow_up_query(
+        query,
+        conversation_context,
+    )
+
+    conceptual = is_conceptual_query(retrieval_query)
+
+    # --------------------------------------------------------
+    # 1. Repository structure
+    # --------------------------------------------------------
+    if is_repository_structure_query(retrieval_query):
         return build_repository_structure_answer(repository_path)
 
-    # 2. Language-Specific Files
-    language_filter = detect_language_filter(query)
+    # --------------------------------------------------------
+    # 2. Language-specific file listing
+    # --------------------------------------------------------
+    language_filter = detect_language_filter(retrieval_query)
     if language_filter:
         return build_repository_file_answer(repository_path, language_filter)
 
-    # 3. Generic Repository Files
-    if is_repository_file_query(query):
+    # --------------------------------------------------------
+    # 3. Generic repository file listing
+    # --------------------------------------------------------
+    if is_repository_file_query(retrieval_query):
         return build_repository_file_answer(repository_path)
 
-    # 4. Exact Filename Location
-    filename_candidates = extract_filename_candidates(query)
-    if filename_candidates and is_file_location_query(query):
-        location_result = find_file_location(query, repository_path)
+    # --------------------------------------------------------
+    # 4. Exact filename location
+    # --------------------------------------------------------
+    filename_candidates = extract_filename_candidates(retrieval_query)
+    if filename_candidates and is_file_location_query(retrieval_query):
+        location_result = find_file_location(retrieval_query, repository_path)
         if location_result:
             return location_result
 
-        missing_result = answer_missing_filename_query(query, repository_path)
+        missing_result = answer_missing_filename_query(retrieval_query, repository_path)
         if missing_result:
             return missing_result
 
-    # 5. Exact Identifier Search
-    # If the query is an identifier query, deterministic search MUST resolve it.
-    if is_identifier_query(query):
+    # --------------------------------------------------------
+    # 5. Exact identifier search
+    # --------------------------------------------------------
+    # Explicit semantic mode is intended for conceptual questions. Auto/exact
+    # still use deterministic identifier search when the query clearly names a
+    # code symbol.
+    should_run_identifier_search = (
+        mode != "semantic" and
+        not conceptual and
+        is_identifier_query(retrieval_query)
+    )
+
+    if should_run_identifier_search:
         exact_identifier_result = build_identifier_search_answer(
-            query,
+            retrieval_query,
             repository_path
         )
+
         if exact_identifier_result:
             return exact_identifier_result
 
-        # Missing Identifier -> Return clear negative answer without hallucinating
-        candidates = extract_identifier_candidates(query)
+        # Missing identifier -> return a deterministic negative answer.
+        candidates = extract_identifier_candidates(retrieval_query)
         if candidates:
             missing_id = candidates[0]
             return {
@@ -1406,16 +1791,24 @@ def answer_query(
                 "sources": []
             }
 
-    # 6. Semantic RAG (For conceptual / high-level questions)
+    # --------------------------------------------------------
+    # 6. Hybrid semantic RAG
+    # --------------------------------------------------------
     try:
         results = search_code(
-            query=query,
+            query=retrieval_query,
             repository_path=repository_path,
-            limit=limit
+            limit=(CONCEPTUAL_MAX_RESULTS if conceptual else limit),
         )
     except ValueError as error:
         return {
             "answer": str(error),
+            "sources": []
+        }
+    except Exception as error:
+        print("Semantic retrieval error:", error)
+        return {
+            "answer": "The repository search could not be completed. Please check the backend logs.",
             "sources": []
         }
 
@@ -1425,7 +1818,9 @@ def answer_query(
             "sources": []
         }
 
-    # Build Context & Generate Answer
+    # --------------------------------------------------------
+    # 7. Context + generation
+    # --------------------------------------------------------
     context, sources = build_context(results, repository_path)
     if not context.strip():
         return {
@@ -1433,8 +1828,23 @@ def answer_query(
             "sources": []
         }
 
+    # For follow-up questions, include the previous conversation in the
+    # generation prompt without contaminating the repository retrieval query.
+    generation_query = query
+    if conversation_context:
+        generation_query = f"""
+Previous conversation:
+{conversation_context}
+
+Current user question:
+{query}
+
+Repository retrieval query:
+{retrieval_query}
+""".strip()
+
     from rag.generator import generate_answer
-    answer = generate_answer(query, context)
+    answer = generate_answer(generation_query, context)
 
     return {
         "answer": answer,

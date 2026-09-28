@@ -22,7 +22,7 @@ def clone_repository(repo_url: str, destination: str) -> str:
 
 if __name__ == "__main__":
     repo_url = "https://github.com/lakshr2004/Monetrik-FinanceSystem"
-    destination = "data/monetrik-financesystem"
+    destination = "data/repos/monetrik"
 
     path = clone_repository(repo_url, destination)
 

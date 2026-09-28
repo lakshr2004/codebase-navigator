@@ -3,23 +3,37 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from core.config import validate_runtime_config
-from services.repository_service import load_and_index_repository
+
+from services.repository_service import (
+    get_supported_repositories,
+    get_repository_path,
+    index_local_repository,
+)
+
 from retrieval.search import answer_query
-from rag.vector_store import list_repositories
 
 from api.conversation import (
     get_history,
     add_message,
     build_conversation_context,
-    clear_history
+    clear_history,
 )
 
+
+# ============================================================
+# APP
+# ============================================================
 
 app = FastAPI(
     title="Codebase Navigator AI",
     description="AI-powered codebase understanding and navigation system",
     version="0.1.0",
 )
+
+
+# ============================================================
+# CORS
+# ============================================================
 
 app.add_middleware(
     CORSMiddleware,
@@ -34,13 +48,15 @@ app.add_middleware(
 
 
 # ============================================================
-# Request / Response Models
+# REQUEST / RESPONSE MODELS
 # ============================================================
+
 
 class QueryRequest(BaseModel):
     query: str
-    repository_path: str
+    repository_id: str
     session_id: str
+    mode: str = "auto"
 
 
 class Source(BaseModel):
@@ -67,13 +83,16 @@ class RepositoryResponse(BaseModel):
 
 
 class RepositoryInfo(BaseModel):
+    id: str
     name: str
-    collection_name: str
+    repository_path: str
+    indexed: bool
 
 
 # ============================================================
-# Basic Routes
+# BASIC ROUTES
 # ============================================================
+
 
 @app.get("/")
 def root():
@@ -94,6 +113,7 @@ def health():
 def readiness():
     try:
         config = validate_runtime_config()
+
         return {
             "status": "ready",
             "checks": {
@@ -102,212 +122,341 @@ def readiness():
                 "qdrant_enabled": config["qdrant_enabled"],
             },
         }
+
     except RuntimeError as exc:
-        raise HTTPException(status_code=503, detail=str(exc))
+        raise HTTPException(
+            status_code=503,
+            detail=str(exc),
+        )
 
 
 # ============================================================
-# Repository Routes
+# REPOSITORY ROUTES
 # ============================================================
+
 
 @app.get(
     "/repositories",
-    response_model=list[RepositoryInfo]
+    response_model=list[RepositoryInfo],
 )
 def get_repositories():
+    """
+    Return only the supported local repositories.
 
-    return list_repositories()
+    Currently:
+        - Monetrik
+        - TicketPeChalo.in
+    """
+
+    try:
+        return get_supported_repositories()
+
+    except Exception as exc:
+        print("Repository listing error:", exc)
+
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to load repositories",
+        )
+
+
+# ------------------------------------------------------------
+# Optional GitHub loading route
+# ------------------------------------------------------------
 
 
 @app.post(
     "/repositories/load",
-    response_model=RepositoryResponse
+    response_model=RepositoryResponse,
 )
 def load_repository(request: RepositoryRequest):
+    """
+    This endpoint is kept for compatibility.
 
-    if not request.repo_url.strip():
+    The current application workflow is focused on the two
+    local repositories returned by /repositories.
+    """
 
+    repo_url = request.repo_url.strip()
+
+    if not repo_url:
         raise HTTPException(
             status_code=400,
-            detail="Repository URL cannot be empty"
+            detail="Repository URL cannot be empty",
+        )
+
+    raise HTTPException(
+        status_code=400,
+        detail=(
+            "This version of Codebase Navigator uses the two "
+            "configured local repositories. Select a repository "
+            "from /repositories instead."
+        ),
+    )
+
+
+# ============================================================
+# INDEX LOCAL REPOSITORY
+# ============================================================
+
+
+@app.post("/repositories/{repository_id}/index")
+def index_repository_route(repository_id: str):
+    """
+    Index one of the supported local repositories.
+    """
+
+    repository_id = repository_id.strip()
+
+    if not repository_id:
+        raise HTTPException(
+            status_code=400,
+            detail="Repository ID cannot be empty",
         )
 
     try:
-
-        repository_path = load_and_index_repository(
-            request.repo_url
+        result = index_local_repository(
+            repository_id
         )
 
         return {
-            "message": "Repository loaded and indexed successfully",
-            "repository_path": repository_path
+            "message": "Repository indexed successfully",
+            **result,
         }
 
-    except Exception as e:
+    except FileNotFoundError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail=str(exc),
+        )
+
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=str(exc),
+        )
+
+    except Exception as exc:
+        print(
+            "Repository indexing error:",
+            exc,
+        )
 
         raise HTTPException(
             status_code=500,
-            detail=str(e)
+            detail="Failed to index repository",
         )
 
 
 # ============================================================
-# Ask / Conversation Route
+# ASK / CONVERSATION
 # ============================================================
+
 
 @app.post(
     "/ask",
-    response_model=AskResponse
+    response_model=AskResponse,
 )
 def ask(request: QueryRequest):
+    """
+    Ask a question against the selected repository.
 
+    Frontend sends:
+        repository_id
+        session_id
+        mode
+
+    Backend resolves:
+        repository_id -> local repository path
+
+    Then retrieval is performed against that repository.
+    """
+
+    # --------------------------------------------------------
     # Validate query
-    if not request.query.strip():
+    # --------------------------------------------------------
 
+    query = request.query.strip()
+
+    if not query:
         raise HTTPException(
             status_code=400,
-            detail="Query cannot be empty"
+            detail="Query cannot be empty",
         )
 
-    # Validate repository path
-    if not request.repository_path.strip():
+    # --------------------------------------------------------
+    # Validate repository ID
+    # --------------------------------------------------------
 
+    repository_id = request.repository_id.strip()
+
+    if not repository_id:
         raise HTTPException(
             status_code=400,
-            detail="Repository path cannot be empty"
+            detail="Repository ID cannot be empty",
         )
 
+    # --------------------------------------------------------
     # Validate session ID
-    if not request.session_id.strip():
+    # --------------------------------------------------------
 
+    session_id = request.session_id.strip()
+
+    if not session_id:
         raise HTTPException(
             status_code=400,
-            detail="Session ID cannot be empty"
+            detail="Session ID cannot be empty",
+        )
+
+    # --------------------------------------------------------
+    # Validate query mode
+    # --------------------------------------------------------
+
+    mode = request.mode.strip().lower()
+
+    if mode not in {"auto", "exact", "semantic"}:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Invalid query mode. "
+                "Use 'auto', 'exact' or 'semantic'."
+            ),
         )
 
     try:
 
         # ----------------------------------------------------
-        # 1. Get previous conversation
+        # 1. Resolve repository ID -> local path
+        # ----------------------------------------------------
+
+        repository_path = get_repository_path(
+            repository_id
+        )
+
+        if not repository_path:
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    f"Repository not found: "
+                    f"{repository_id}"
+                ),
+            )
+
+        # ----------------------------------------------------
+        # 2. Get previous conversation
         # ----------------------------------------------------
 
         conversation_context = build_conversation_context(
-            request.session_id
+            session_id
         )
-
-        # ----------------------------------------------------
-        # 2. Build query with previous context
-        # ----------------------------------------------------
-
-        if conversation_context:
-
-            contextual_query = f"""
-Previous conversation:
-
-{conversation_context}
-
-Current user question:
-
-{request.query}
-"""
-
-        else:
-
-            contextual_query = request.query
 
         # ----------------------------------------------------
         # 3. Retrieve + generate answer
         # ----------------------------------------------------
+        # Keep the current question separate from conversation history.
+        # Retrieval should search the repository for the actual question,
+        # while the history is available to the retrieval layer only when
+        # it is useful for resolving follow-up questions.
 
         result = answer_query(
-            contextual_query,
-            request.repository_path
+            query=query,
+            repository_path=repository_path,
+            mode=mode,
+            conversation_context=conversation_context,
         )
 
         # ----------------------------------------------------
-        # 4. Save user message
+        # 5. Save user message
         # ----------------------------------------------------
 
         add_message(
-            session_id=request.session_id,
+            session_id=session_id,
             role="user",
-            content=request.query
+            content=query,
         )
 
         # ----------------------------------------------------
-        # 5. Save assistant response
+        # 6. Save assistant response
         # ----------------------------------------------------
 
         add_message(
-            session_id=request.session_id,
+            session_id=session_id,
             role="assistant",
-            content=result["answer"]
+            content=result["answer"],
         )
 
         # ----------------------------------------------------
-        # 6. Return response
+        # 7. Return response
         # ----------------------------------------------------
 
         return {
-            "query": request.query,
+            "query": query,
             "answer": result["answer"],
-            "sources": result["sources"]
+            "sources": result["sources"],
         }
 
-    except ValueError as e:
+    except HTTPException:
+        raise
 
+    except ValueError as exc:
         raise HTTPException(
             status_code=404,
-            detail=str(e)
+            detail=str(exc),
         )
 
-    except Exception as e:
-
-        print("Conversation error:", e)
+    except Exception as exc:
+        print(
+            "Conversation error:",
+            exc,
+        )
 
         raise HTTPException(
             status_code=500,
-            detail="Failed to process query"
+            detail="Failed to process query",
         )
 
 
 # ============================================================
-# Conversation History
+# CONVERSATION HISTORY
 # ============================================================
+
 
 @app.get("/conversations/{session_id}")
 def get_conversation(session_id: str):
 
-    if not session_id.strip():
+    session_id = session_id.strip()
 
+    if not session_id:
         raise HTTPException(
             status_code=400,
-            detail="Session ID cannot be empty"
+            detail="Session ID cannot be empty",
         )
 
     return {
         "session_id": session_id,
-        "messages": get_history(session_id)
+        "messages": get_history(session_id),
     }
 
 
 # ============================================================
-# Clear Conversation
+# CLEAR CONVERSATION
 # ============================================================
+
 
 @app.delete("/conversations/{session_id}")
 def delete_conversation(session_id: str):
 
-    if not session_id.strip():
+    session_id = session_id.strip()
 
+    if not session_id:
         raise HTTPException(
             status_code=400,
-            detail="Session ID cannot be empty"
+            detail="Session ID cannot be empty",
         )
 
     clear_history(session_id)
 
     return {
         "message": "Conversation history cleared",
-        "session_id": session_id
+        "session_id": session_id,
     }
