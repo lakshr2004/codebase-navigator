@@ -350,6 +350,52 @@ def _extract_explicit_usages_candidates(
     return results
 
 
+def _extract_explicit_definition_candidates(
+    query: str
+) -> list[str]:
+    """
+    Extract identifiers from explicit definition/declaration questions.
+
+    Lowercase identifiers such as ``protect`` are valid programming symbols,
+    so an explicit definition pattern must be allowed to promote them into
+    identifier mode. The pattern is intentionally single-token (apart from an
+    optional type word) so natural-language questions such as
+    "Where is the authentication flow defined?" do not become exact lookups.
+
+    Supported examples:
+        Where is protect defined?
+        Where is loginUser defined?
+        Where is the function protect defined?
+        Find definition of getRecords
+        Where is `User` declared?
+        protect kaha defined hai?
+    """
+    patterns = [
+        r"\bwhere\s+is\s+(?:the\s+)?(?:function|method|class|component|variable|const|let|var|identifier|symbol)?\s*"
+        r'[`"\']?([A-Za-z_$][A-Za-z0-9_$]*)[`"\']?\s+'
+        r"(?:defined|declared|implemented)\b",
+        r"\bfind\s+(?:the\s+)?(?:definition|declaration|implementation)\s+of\s+"
+        r'[`"\']?([A-Za-z_$][A-Za-z0-9_$]*)[`"\']?\b',
+        r"\b(?:definition|declaration|implementation)\s+of\s+"
+        r'[`"\']?([A-Za-z_$][A-Za-z0-9_$]*)[`"\']?\b',
+        r"\b(?:kaha|where)\s+is\s+"
+        r'[`"\']?([A-Za-z_$][A-Za-z0-9_$]*)[`"\']?\s+'
+        r"(?:defined|declared|implemented)\b",
+        r"\b([A-Za-z_$][A-Za-z0-9_$]*)\s+(?:kaha\s+)?"
+        r"(?:defined|declared|implemented)\s+(?:hai|hain)\b",
+        r"\b([A-Za-z_$][A-Za-z0-9_$]*)\s+kaha\s+(?:defined|define|implemented|declared)\b",
+    ]
+
+    results = []
+    for pattern in patterns:
+        for match in re.finditer(pattern, query, re.IGNORECASE):
+            token = match.group(1)
+            if token and token not in results:
+                results.append(token)
+
+    return results
+
+
 def is_identifier_query(
     query: str
 ) -> bool:
@@ -374,7 +420,9 @@ def is_identifier_query(
         return False
 
     # 1. Explicit existence patterns for a code symbol
-    #    "Does getRecordsBackup exist?", "Does increaseScore exist?"
+    #    "Does getRecordsBackup exist?", "Does protect exist?"
+    #    IMPORTANT: match against the ORIGINAL query so camelCase/PascalCase
+    #    casing is preserved.
     existence_patterns = [
         r"\bdoes\s+[`'\"]?([A-Za-z_$][A-Za-z0-9_$]*)[`'\"]?\s+exist\b",
         r"\bis\s+there\s+(?:a\s+|an\s+)?[`'\"]?([A-Za-z_$][A-Za-z0-9_$]*)[`'\"]?"
@@ -382,12 +430,17 @@ def is_identifier_query(
         r"\b(?:check\s+if|see\s+if)\s+[`'\"]?([A-Za-z_$][A-Za-z0-9_$]*)[`'\"]?\s+exists?\b",
     ]
     for p in existence_patterns:
-        m = re.search(p, query_lower)
+        m = re.search(p, query, re.IGNORECASE)
         if m:
             candidate = m.group(1)
-            # Even existence queries require a code-like candidate
-            if is_code_like(candidate):
+            if is_code_like(candidate) or candidate in _extract_explicit_definition_candidates(query):
                 return True
+
+    # 1b. Explicit definition/declaration/implementation patterns.
+    #     This is the key fix for valid lowercase identifiers such as
+    #     "protect" in "Where is protect defined?".
+    if _extract_explicit_definition_candidates(query):
+        return True
 
     # 2. Conceptual prefixes → always semantic RAG unless they also contain
     #    an explicit "where is X defined" sub-pattern with a code-like X
@@ -423,20 +476,25 @@ def is_identifier_query(
     # 3. For non-conceptual queries: check if the query matches an
     #    identifier-mode pattern AND yields at least one code-like candidate.
 
-    # 3a. Explicit type-keyword candidates (always code-like)
+    # 3a. Explicit definition/declaration candidates (always code-like by
+    #     query intent, including lowercase identifiers).
+    if _extract_explicit_definition_candidates(query):
+        return True
+
+    # 3b. Explicit type-keyword candidates (always code-like)
     if _extract_explicit_type_keyword_candidates(query):
         return True
 
-    # 3b. Explicit usages-pattern candidates (always code-like by intent)
+    # 3c. Explicit usages-pattern candidates (always code-like by intent)
     if _extract_explicit_usages_candidates(query):
         return True
 
-    # 3c. Backtick/quote-enclosed symbols are always code-like
+    # 3d. Backtick/quote-enclosed symbols are always code-like
     enclosed = re.findall(r"[`'\"]([A-Za-z_$][A-Za-z0-9_$]*)['\"`]", query)
     if enclosed:
         return True
 
-    # 3d. Identifier-mode trigger keywords present in query
+    # 3e. Identifier-mode trigger keywords present in query
     identifier_trigger_patterns = [
         "defined", "definition", "declare", "declared", "declaration",
         "implemented", "implementation",
@@ -455,7 +513,7 @@ def is_identifier_query(
     if not has_trigger:
         return False
 
-    # 3e. CODE-LIKENESS GATE: only enter identifier mode if at least one
+    # 3f. CODE-LIKENESS GATE: only enter identifier mode if at least one
     #     extracted candidate is structurally code-like.
     #     This prevents "Where is the main game logic defined?" from
     #     entering identifier mode just because "where is" + "defined" match.
@@ -587,7 +645,14 @@ def extract_identifier_candidates(
         if token not in candidates and token.lower() not in [c.lower() for c in candidates]:
             candidates.append(token)
 
-    # Priority 5 — Structurally code-like free tokens
+    # Priority 5 — Explicit definition/declaration tokens
+    #   This deliberately accepts lowercase symbols such as "protect".
+    #   The surrounding phrase is what establishes code-search intent.
+    for token in _extract_explicit_definition_candidates(query):
+        if token not in candidates and token.lower() not in [c.lower() for c in candidates]:
+            candidates.append(token)
+
+    # Priority 6 — Structurally code-like free tokens
     #   Only accept tokens that pass the is_code_like() check.
     #   This excludes plain lowercase English words.
     raw_identifiers = re.findall(
