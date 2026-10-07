@@ -85,6 +85,7 @@ class RepositoryResponse(BaseModel):
 class RepositoryInfo(BaseModel):
     id: str
     name: str
+    collection_name: str
     repository_path: str
     indexed: bool
 

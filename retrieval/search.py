@@ -1,6 +1,7 @@
 import os
 import re
 import sys
+import logging
 
 sys.path.append(
     os.path.dirname(
@@ -29,8 +30,10 @@ from ingestion.scanner import (
 SIMILARITY_THRESHOLD = 0.04
 DEFAULT_LIMIT = 12
 SEMANTIC_RETRIEVAL_LIMIT = 60
-MAX_CONTEXT_CHARS = 36000
+MAX_CONTEXT_CHARS = 10000
 CONCEPTUAL_MAX_RESULTS = 16
+INSUFFICIENT_EVIDENCE_RESPONSE = "I couldn't find enough information in the codebase."
+logger = logging.getLogger(__name__)
 
 LOCKFILE_NAMES = {
     "package-lock.json",
@@ -41,6 +44,34 @@ LOCKFILE_NAMES = {
     "cargo.lock",
     "poetry.lock",
 }
+
+GENERATED_DIRECTORIES = {
+    "node_modules",
+    "dist",
+    "build",
+    "coverage",
+    ".next",
+    ".nuxt",
+    "target",
+    "vendor",
+}
+
+
+def _is_eligible_evidence_path(file_path: str) -> bool:
+    """Exclude dependency manifests and clearly generated/build output as evidence."""
+    normalized_path = str(file_path or "").replace("\\", "/").strip("/")
+    if not normalized_path:
+        return False
+
+    path_parts = [part.lower() for part in normalized_path.split("/") if part]
+    filename = path_parts[-1] if path_parts else ""
+    if filename in LOCKFILE_NAMES:
+        return False
+    if any(part in GENERATED_DIRECTORIES for part in path_parts[:-1]):
+        return False
+    if filename.endswith((".min.js", ".min.css", ".map")) or ".generated." in filename:
+        return False
+    return True
 
 
 # ============================================================
@@ -258,53 +289,64 @@ def is_code_like(
     token: str
 ) -> bool:
     """
-    Return True if a token has structural evidence of being a code identifier
-    rather than a plain English word.
+    Return True when a token structurally looks like a code identifier or code
+    expression rather than natural-language prose.
 
-    Evidence accepted:
-    - camelCase: at least one internal uppercase letter (e.g. handleSubmit)
-    - PascalCase: starts with uppercase and has >=2 chars (e.g. App, AuthContext)
-    - snake_case: contains at least one underscore between word chars (e.g. get_user)
-    - SCREAMING_SNAKE: all-caps with underscore (e.g. MAX_RETRIES)
-    - $ prefix (e.g. $jqueryObj)
-    - dotted/member notation (e.g. req.body, router.get)
-    - backtick-enclosed (handled before this call)
-    - CSS selector (#id notation handled before this call)
+    Accepted patterns include:
+    - camelCase / PascalCase / snake_case / SCREAMING_SNAKE
+    - $-prefixed variables
+    - dotted/member access (req.body, router.get)
+    - function-call / method-call notation
+    - explicit quoted/backtick identifiers (normalization happens before call)
+    - CSS selector fragments (#id, .class) are handled by caller logic
 
-    Plain lowercase single-word English tokens ("main", "game", "logic",
-    "authentication", "flow", "loop", "state") return False.
+    Plain lowercase English words such as "main", "game", "logic", "flow",
+    "state", or "authentication" are intentionally rejected unless the caller
+    has explicit code-search intent for that exact token.
     """
+    if token is None:
+        return False
+
+    token = str(token).strip()
     if not token:
         return False
 
-    # $-prefixed jQuery/JS convention
+    # Strip leading/trailing quotes/backticks that are often used in prose to
+    # refer to exact identifiers.
+    token = token.strip("`'\"")
+    if not token:
+        return False
+
+    # Common code expression patterns.
     if token.startswith("$"):
         return True
-
-    # Dotted member access (req.body, router.get)
-    if "." in token:
+    if "." in token or "::" in token:
         return True
-
-    # Parentheses = function call notation
-    if "(" in token or ")" in token:
+    if "(" in token or ")" in token or "[" in token or "]" in token:
         return True
 
     # snake_case / SCREAMING_SNAKE: underscore between word chars
     if re.search(r"[A-Za-z0-9]_[A-Za-z0-9]", token):
         return True
 
-    # camelCase: starts lowercase, has at least one internal uppercase letter
-    if token[0].islower() and any(c.isupper() for c in token[1:]):
+    # Lowercase identifiers with internal uppercase letters are common in JS/TS
+    # and Python (camelCase, mixedCase).
+    if token[:1].islower() and any(ch.isupper() for ch in token[1:]):
         return True
 
-    # PascalCase: starts uppercase
-    # We accept single-word PascalCase (App, User, AuthContext) as identifiers
-    # since plain English words that start sentences are excluded by the
-    # surrounding caller context (we only reach here after stripping query verbs)
-    if token[0].isupper() and len(token) >= 2:
+    # PascalCase or initial-cap identifier names are code-like when they are not
+    # just a sentence-leading English word.
+    if token[:1].isupper() and len(token) >= 2:
         return True
 
-    # All other tokens: plain lowercase words — NOT code-like
+    # A bare all-caps constant is still code-like.
+    if token.isupper() and len(token) >= 2:
+        return True
+
+    # Explicit underscore-prefixed names (e.g. _privateVar, __all__) are code-like.
+    if token.startswith("_") and len(token) >= 2:
+        return True
+
     return False
 
 
@@ -313,16 +355,30 @@ def _extract_explicit_type_keyword_candidates(
 ) -> list[str]:
     """
     Extract identifiers that are explicitly named with a type keyword.
-    Patterns: "function X", "class X", "component X", "method X",
-              "variable X", "const X", "interface X", "struct X"
-    These are always treated as code-like regardless of casing.
+
+    The candidate must still look like a real symbol; otherwise phrases like
+    "component defined" or "function defined" are incorrectly interpreted as a
+    symbol name.
     """
     type_keyword_pattern = re.compile(
         r"\b(?:function|class|method|component|variable|const|let|var|interface|struct|type|enum)\s+"
         r"([A-Za-z_$][A-Za-z0-9_$]*)\b",
         re.IGNORECASE,
     )
-    return [m.group(1) for m in type_keyword_pattern.finditer(query)]
+
+    results = []
+    for match in type_keyword_pattern.finditer(query):
+        candidate = match.group(1)
+        if not candidate:
+            continue
+        if candidate.lower() in {"defined", "definition", "declared", "declaration", "implemented", "implementation", "usage", "usages", "reference", "references"}:
+            continue
+        if not is_code_like(candidate):
+            continue
+        if candidate not in results and candidate.lower() not in {r.lower() for r in results}:
+            results.append(candidate)
+
+    return results
 
 
 def _extract_explicit_usages_candidates(
@@ -1344,6 +1400,37 @@ def content_match_score(
     return sum(1 for token in tokens if token in content)
 
 
+def query_signal_score(
+    query: str,
+    result
+) -> float:
+    """Heuristic relevance signal used to reject weak semantic matches."""
+    payload = result.payload or {}
+    metadata = payload.get("metadata", {})
+
+    filename = str(metadata.get("filename", "")).lower()
+    relative_path = str(metadata.get("relative_path") or metadata.get("file_path", "")).lower()
+    content = str(payload.get("content", "")).lower()
+
+    if not query or not isinstance(query, str):
+        return 0.0
+
+    score = 0.0
+    tokens = extract_query_tokens(query)
+    if not tokens:
+        return 0.0
+
+    for token in tokens:
+        if token in filename:
+            score += 1.5
+        if token in relative_path:
+            score += 1.25
+        if token in content:
+            score += 1.0
+
+    return score
+
+
 def deduplicate_results(
     results
 ):
@@ -1560,7 +1647,11 @@ def _lexical_results_as_objects(
     lexical_matches = search_repository_text(query, repository_path)
     results = []
 
-    for match in lexical_matches[:limit]:
+    eligible_matches = [
+        match for match in lexical_matches
+        if _is_eligible_evidence_path(match.get("file", ""))
+    ]
+    for match in eligible_matches[:limit]:
         payload = {
             "content": match.get("content", ""),
             "metadata": {
@@ -1618,6 +1709,24 @@ def search_code(
         r for r in results
         if r.score >= SIMILARITY_THRESHOLD
     ]
+    relevant_results = [
+        result for result in relevant_results
+        if _is_eligible_evidence_path(
+            (result.payload or {}).get("metadata", {}).get("relative_path")
+            or (result.payload or {}).get("metadata", {}).get("file_path", "")
+        )
+    ]
+
+    # Semantic-only hits must still carry at least some evidence-bearing signal
+    # from the query itself. This prevents generic low-similarity matches from
+    # being treated as repository evidence when the codebase truly has no
+    # matching implementation.
+    relevant_results = [
+        result for result in relevant_results
+        if query_signal_score(query, result) > 0
+        or keyword_matches(query, result) > 0
+        or content_match_score(query, result) > 0
+    ]
 
     # Semantic retrieval is primary. For conceptual questions, add a small
     # deterministic lexical pass so important exact terms/files are not lost
@@ -1629,6 +1738,12 @@ def search_code(
             repository_path,
             limit=24,
         )
+        lexical_results = [
+            result for result in lexical_results
+            if query_signal_score(lexical_query, result) > 0
+            or keyword_matches(lexical_query, result) > 0
+            or content_match_score(lexical_query, result) > 0
+        ]
         relevant_results.extend(lexical_results)
 
     ranked_results = []
@@ -1636,11 +1751,13 @@ def search_code(
         semantic_score = float(r.score)
         keyword_score = keyword_matches(query, r)
         exact_content_matches = content_match_score(query, r)
+        signal_score = query_signal_score(query, r)
 
         final_score = (
             semantic_score
             + (keyword_score * 0.01)
             + (exact_content_matches * 0.08)
+            + (signal_score * 0.04)
         )
         ranked_results.append((final_score, r))
 
@@ -1680,6 +1797,74 @@ def search_code(
 # Context Construction
 # ============================================================
 
+def _read_source_evidence(result, repository_path: str) -> dict | None:
+    """Resolve a retrieved chunk to a current, repository-contained line range."""
+    payload = result.payload or {}
+    metadata = payload.get("metadata", {})
+    raw_path = metadata.get("relative_path") or metadata.get("file_path")
+    if not raw_path:
+        return None
+
+    raw_path = str(raw_path)
+    if os.path.isabs(raw_path):
+        relative_path = clean_source_path(raw_path, repository_path)
+    else:
+        relative_path = raw_path.replace("\\", "/")
+
+    relative_path = os.path.normpath(relative_path).replace("\\", "/")
+    if (
+        not relative_path
+        or relative_path == "."
+        or relative_path.startswith("../")
+        or relative_path == ".."
+        or os.path.isabs(relative_path)
+        or not _is_eligible_evidence_path(relative_path)
+    ):
+        return None
+
+    repository_root = os.path.realpath(repository_path)
+    absolute_path = os.path.realpath(
+        os.path.join(repository_root, relative_path.replace("/", os.sep))
+    )
+    try:
+        if os.path.commonpath([repository_root, absolute_path]) != repository_root:
+            return None
+    except ValueError:
+        return None
+
+    try:
+        with open(absolute_path, "r", encoding="utf-8", errors="replace") as source_file:
+            source_lines = source_file.readlines()
+    except OSError:
+        return None
+
+    start_line = metadata.get("start_line")
+    end_line = metadata.get("end_line")
+    if (
+        isinstance(start_line, bool)
+        or isinstance(end_line, bool)
+        or not isinstance(start_line, int)
+        or not isinstance(end_line, int)
+        or start_line < 1
+        or end_line < start_line
+        or end_line > len(source_lines)
+    ):
+        return None
+
+    content = "".join(source_lines[start_line - 1:end_line]).rstrip()
+    if not content.strip():
+        return None
+
+    return {
+        "file": relative_path,
+        "language": metadata.get("language") or get_file_language(relative_path),
+        "start_line": start_line,
+        "end_line": end_line,
+        "score": float(result.score),
+        "content": content,
+    }
+
+
 def build_context(
     results,
     repository_path: str
@@ -1689,49 +1874,31 @@ def build_context(
     current_size = 0
 
     for result in results:
-        payload = result.payload or {}
-        if not payload:
+        source = _read_source_evidence(result, repository_path)
+        if source is None:
             continue
 
-        metadata = payload.get("metadata", {})
-        content = str(payload.get("content", ""))
-        if not content.strip():
-            continue
-
-        file_path = metadata.get("relative_path") or metadata.get("file_path") or "Unknown file"
-        if not metadata.get("relative_path"):
-            file_path = clean_source_path(file_path, repository_path)
-
-        language = metadata.get("language", "unknown")
-        start_line = metadata.get("start_line")
-        end_line = metadata.get("end_line")
-
+        evidence_id = len(sources) + 1
         block = (
-            f"File: {file_path}\n"
-            f"Language: {language}\n"
-            f"Lines: {start_line} - {end_line}\n"
+            f"[Evidence ID: {evidence_id}]\n"
+            f"File: {source['file']}\n"
+            f"Language: {source['language']}\n"
+            f"Lines: {source['start_line']} - {source['end_line']}\n"
             f"Code:\n\n"
-            f"{content}\n\n"
+            f"{source['content']}\n\n"
         )
 
         remaining = MAX_CONTEXT_CHARS - current_size
         if remaining <= 0:
             break
-
         if len(block) > remaining:
-            if remaining < 500:
-                break
-            block = block[:remaining]
+            continue
 
         context_parts.append(block)
         current_size += len(block)
-
         sources.append({
-            "file": file_path,
-            "language": language,
-            "start_line": start_line,
-            "end_line": end_line,
-            "score": float(result.score),
+            "evidence_id": evidence_id,
+            **source,
         })
 
     return "\n".join(context_parts), sources
@@ -1850,9 +2017,8 @@ def answer_query(
         # Missing identifier -> return a deterministic negative answer.
         candidates = extract_identifier_candidates(retrieval_query)
         if candidates:
-            missing_id = candidates[0]
             return {
-                "answer": f"I couldn't find the identifier `{missing_id}` in the repository.",
+                "answer": INSUFFICIENT_EVIDENCE_RESPONSE,
                 "sources": []
             }
 
@@ -1871,15 +2037,15 @@ def answer_query(
             "sources": []
         }
     except Exception as error:
-        print("Semantic retrieval error:", error)
+        logger.exception("Semantic retrieval failed: %s", error)
         return {
-            "answer": "The repository search could not be completed. Please check the backend logs.",
+            "answer": INSUFFICIENT_EVIDENCE_RESPONSE,
             "sources": []
         }
 
     if not results:
         return {
-            "answer": "I couldn't find enough relevant information in the codebase.",
+            "answer": INSUFFICIENT_EVIDENCE_RESPONSE,
             "sources": []
         }
 
@@ -1889,7 +2055,7 @@ def answer_query(
     context, sources = build_context(results, repository_path)
     if not context.strip():
         return {
-            "answer": "I couldn't find enough relevant information in the codebase.",
+            "answer": INSUFFICIENT_EVIDENCE_RESPONSE,
             "sources": []
         }
 
@@ -1908,10 +2074,32 @@ Repository retrieval query:
 {retrieval_query}
 """.strip()
 
-    from rag.generator import generate_answer
-    answer = generate_answer(generation_query, context)
+    from rag.generator import generate_grounded_answer
+    generated = generate_grounded_answer(
+        query=generation_query,
+        context=context,
+        sources=sources,
+    )
+    answer = generated["answer"]
+    cited_ids = set(generated["evidence_ids"])
+    selected_sources = [
+        {
+            key: value
+            for key, value in source.items()
+            if key not in {"evidence_id", "content"}
+            and source["evidence_id"] in cited_ids
+        }
+        for source in sources
+        if source["evidence_id"] in cited_ids
+    ]
+
+    if answer.strip() == INSUFFICIENT_EVIDENCE_RESPONSE or not selected_sources:
+        return {
+            "answer": INSUFFICIENT_EVIDENCE_RESPONSE,
+            "sources": [],
+        }
 
     return {
         "answer": answer,
-        "sources": sources
+        "sources": selected_sources
     }

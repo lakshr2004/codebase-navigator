@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from services.indexer import index_repository
-from rag.vector_store import collection_exists
+from rag.vector_store import collection_exists, get_collection_name
 
 
 # ============================================================
@@ -42,11 +42,15 @@ def get_supported_repositories():
         repository_path_string = str(
             repository_path
         )
+        collection_name = get_collection_name(
+            repository_path_string
+        )
 
         repositories.append(
             {
                 "id": repository_id,
                 "name": repository_path.name,
+                "collection_name": collection_name,
                 "repository_path": repository_path_string,
                 "indexed": collection_exists(
                     repository_path_string
