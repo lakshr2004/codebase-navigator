@@ -1,7 +1,6 @@
 import os
 import re
 import sys
-import logging
 
 sys.path.append(
     os.path.dirname(
@@ -30,10 +29,8 @@ from ingestion.scanner import (
 SIMILARITY_THRESHOLD = 0.04
 DEFAULT_LIMIT = 12
 SEMANTIC_RETRIEVAL_LIMIT = 60
-MAX_CONTEXT_CHARS = 10000
+MAX_CONTEXT_CHARS = 36000
 CONCEPTUAL_MAX_RESULTS = 16
-INSUFFICIENT_EVIDENCE_RESPONSE = "I couldn't find enough information in the codebase."
-logger = logging.getLogger(__name__)
 
 LOCKFILE_NAMES = {
     "package-lock.json",
@@ -44,34 +41,6 @@ LOCKFILE_NAMES = {
     "cargo.lock",
     "poetry.lock",
 }
-
-GENERATED_DIRECTORIES = {
-    "node_modules",
-    "dist",
-    "build",
-    "coverage",
-    ".next",
-    ".nuxt",
-    "target",
-    "vendor",
-}
-
-
-def _is_eligible_evidence_path(file_path: str) -> bool:
-    """Exclude dependency manifests and clearly generated/build output as evidence."""
-    normalized_path = str(file_path or "").replace("\\", "/").strip("/")
-    if not normalized_path:
-        return False
-
-    path_parts = [part.lower() for part in normalized_path.split("/") if part]
-    filename = path_parts[-1] if path_parts else ""
-    if filename in LOCKFILE_NAMES:
-        return False
-    if any(part in GENERATED_DIRECTORIES for part in path_parts[:-1]):
-        return False
-    if filename.endswith((".min.js", ".min.css", ".map")) or ".generated." in filename:
-        return False
-    return True
 
 
 # ============================================================
@@ -289,64 +258,53 @@ def is_code_like(
     token: str
 ) -> bool:
     """
-    Return True when a token structurally looks like a code identifier or code
-    expression rather than natural-language prose.
+    Return True if a token has structural evidence of being a code identifier
+    rather than a plain English word.
 
-    Accepted patterns include:
-    - camelCase / PascalCase / snake_case / SCREAMING_SNAKE
-    - $-prefixed variables
-    - dotted/member access (req.body, router.get)
-    - function-call / method-call notation
-    - explicit quoted/backtick identifiers (normalization happens before call)
-    - CSS selector fragments (#id, .class) are handled by caller logic
+    Evidence accepted:
+    - camelCase: at least one internal uppercase letter (e.g. handleSubmit)
+    - PascalCase: starts with uppercase and has >=2 chars (e.g. App, AuthContext)
+    - snake_case: contains at least one underscore between word chars (e.g. get_user)
+    - SCREAMING_SNAKE: all-caps with underscore (e.g. MAX_RETRIES)
+    - $ prefix (e.g. $jqueryObj)
+    - dotted/member notation (e.g. req.body, router.get)
+    - backtick-enclosed (handled before this call)
+    - CSS selector (#id notation handled before this call)
 
-    Plain lowercase English words such as "main", "game", "logic", "flow",
-    "state", or "authentication" are intentionally rejected unless the caller
-    has explicit code-search intent for that exact token.
+    Plain lowercase single-word English tokens ("main", "game", "logic",
+    "authentication", "flow", "loop", "state") return False.
     """
-    if token is None:
-        return False
-
-    token = str(token).strip()
     if not token:
         return False
 
-    # Strip leading/trailing quotes/backticks that are often used in prose to
-    # refer to exact identifiers.
-    token = token.strip("`'\"")
-    if not token:
-        return False
-
-    # Common code expression patterns.
+    # $-prefixed jQuery/JS convention
     if token.startswith("$"):
         return True
-    if "." in token or "::" in token:
+
+    # Dotted member access (req.body, router.get)
+    if "." in token:
         return True
-    if "(" in token or ")" in token or "[" in token or "]" in token:
+
+    # Parentheses = function call notation
+    if "(" in token or ")" in token:
         return True
 
     # snake_case / SCREAMING_SNAKE: underscore between word chars
     if re.search(r"[A-Za-z0-9]_[A-Za-z0-9]", token):
         return True
 
-    # Lowercase identifiers with internal uppercase letters are common in JS/TS
-    # and Python (camelCase, mixedCase).
-    if token[:1].islower() and any(ch.isupper() for ch in token[1:]):
+    # camelCase: starts lowercase, has at least one internal uppercase letter
+    if token[0].islower() and any(c.isupper() for c in token[1:]):
         return True
 
-    # PascalCase or initial-cap identifier names are code-like when they are not
-    # just a sentence-leading English word.
-    if token[:1].isupper() and len(token) >= 2:
+    # PascalCase: starts uppercase
+    # We accept single-word PascalCase (App, User, AuthContext) as identifiers
+    # since plain English words that start sentences are excluded by the
+    # surrounding caller context (we only reach here after stripping query verbs)
+    if token[0].isupper() and len(token) >= 2:
         return True
 
-    # A bare all-caps constant is still code-like.
-    if token.isupper() and len(token) >= 2:
-        return True
-
-    # Explicit underscore-prefixed names (e.g. _privateVar, __all__) are code-like.
-    if token.startswith("_") and len(token) >= 2:
-        return True
-
+    # All other tokens: plain lowercase words — NOT code-like
     return False
 
 
@@ -355,30 +313,16 @@ def _extract_explicit_type_keyword_candidates(
 ) -> list[str]:
     """
     Extract identifiers that are explicitly named with a type keyword.
-
-    The candidate must still look like a real symbol; otherwise phrases like
-    "component defined" or "function defined" are incorrectly interpreted as a
-    symbol name.
+    Patterns: "function X", "class X", "component X", "method X",
+              "variable X", "const X", "interface X", "struct X"
+    These are always treated as code-like regardless of casing.
     """
     type_keyword_pattern = re.compile(
         r"\b(?:function|class|method|component|variable|const|let|var|interface|struct|type|enum)\s+"
         r"([A-Za-z_$][A-Za-z0-9_$]*)\b",
         re.IGNORECASE,
     )
-
-    results = []
-    for match in type_keyword_pattern.finditer(query):
-        candidate = match.group(1)
-        if not candidate:
-            continue
-        if candidate.lower() in {"defined", "definition", "declared", "declaration", "implemented", "implementation", "usage", "usages", "reference", "references"}:
-            continue
-        if not is_code_like(candidate):
-            continue
-        if candidate not in results and candidate.lower() not in {r.lower() for r in results}:
-            results.append(candidate)
-
-    return results
+    return [m.group(1) for m in type_keyword_pattern.finditer(query)]
 
 
 def _extract_explicit_usages_candidates(
@@ -406,52 +350,6 @@ def _extract_explicit_usages_candidates(
     return results
 
 
-def _extract_explicit_definition_candidates(
-    query: str
-) -> list[str]:
-    """
-    Extract identifiers from explicit definition/declaration questions.
-
-    Lowercase identifiers such as ``protect`` are valid programming symbols,
-    so an explicit definition pattern must be allowed to promote them into
-    identifier mode. The pattern is intentionally single-token (apart from an
-    optional type word) so natural-language questions such as
-    "Where is the authentication flow defined?" do not become exact lookups.
-
-    Supported examples:
-        Where is protect defined?
-        Where is loginUser defined?
-        Where is the function protect defined?
-        Find definition of getRecords
-        Where is `User` declared?
-        protect kaha defined hai?
-    """
-    patterns = [
-        r"\bwhere\s+is\s+(?:the\s+)?(?:function|method|class|component|variable|const|let|var|identifier|symbol)?\s*"
-        r'[`"\']?([A-Za-z_$][A-Za-z0-9_$]*)[`"\']?\s+'
-        r"(?:defined|declared|implemented)\b",
-        r"\bfind\s+(?:the\s+)?(?:definition|declaration|implementation)\s+of\s+"
-        r'[`"\']?([A-Za-z_$][A-Za-z0-9_$]*)[`"\']?\b',
-        r"\b(?:definition|declaration|implementation)\s+of\s+"
-        r'[`"\']?([A-Za-z_$][A-Za-z0-9_$]*)[`"\']?\b',
-        r"\b(?:kaha|where)\s+is\s+"
-        r'[`"\']?([A-Za-z_$][A-Za-z0-9_$]*)[`"\']?\s+'
-        r"(?:defined|declared|implemented)\b",
-        r"\b([A-Za-z_$][A-Za-z0-9_$]*)\s+(?:kaha\s+)?"
-        r"(?:defined|declared|implemented)\s+(?:hai|hain)\b",
-        r"\b([A-Za-z_$][A-Za-z0-9_$]*)\s+kaha\s+(?:defined|define|implemented|declared)\b",
-    ]
-
-    results = []
-    for pattern in patterns:
-        for match in re.finditer(pattern, query, re.IGNORECASE):
-            token = match.group(1)
-            if token and token not in results:
-                results.append(token)
-
-    return results
-
-
 def is_identifier_query(
     query: str
 ) -> bool:
@@ -476,9 +374,7 @@ def is_identifier_query(
         return False
 
     # 1. Explicit existence patterns for a code symbol
-    #    "Does getRecordsBackup exist?", "Does protect exist?"
-    #    IMPORTANT: match against the ORIGINAL query so camelCase/PascalCase
-    #    casing is preserved.
+    #    "Does getRecordsBackup exist?", "Does increaseScore exist?"
     existence_patterns = [
         r"\bdoes\s+[`'\"]?([A-Za-z_$][A-Za-z0-9_$]*)[`'\"]?\s+exist\b",
         r"\bis\s+there\s+(?:a\s+|an\s+)?[`'\"]?([A-Za-z_$][A-Za-z0-9_$]*)[`'\"]?"
@@ -486,17 +382,12 @@ def is_identifier_query(
         r"\b(?:check\s+if|see\s+if)\s+[`'\"]?([A-Za-z_$][A-Za-z0-9_$]*)[`'\"]?\s+exists?\b",
     ]
     for p in existence_patterns:
-        m = re.search(p, query, re.IGNORECASE)
+        m = re.search(p, query_lower)
         if m:
             candidate = m.group(1)
-            if is_code_like(candidate) or candidate in _extract_explicit_definition_candidates(query):
+            # Even existence queries require a code-like candidate
+            if is_code_like(candidate):
                 return True
-
-    # 1b. Explicit definition/declaration/implementation patterns.
-    #     This is the key fix for valid lowercase identifiers such as
-    #     "protect" in "Where is protect defined?".
-    if _extract_explicit_definition_candidates(query):
-        return True
 
     # 2. Conceptual prefixes → always semantic RAG unless they also contain
     #    an explicit "where is X defined" sub-pattern with a code-like X
@@ -532,25 +423,20 @@ def is_identifier_query(
     # 3. For non-conceptual queries: check if the query matches an
     #    identifier-mode pattern AND yields at least one code-like candidate.
 
-    # 3a. Explicit definition/declaration candidates (always code-like by
-    #     query intent, including lowercase identifiers).
-    if _extract_explicit_definition_candidates(query):
-        return True
-
-    # 3b. Explicit type-keyword candidates (always code-like)
+    # 3a. Explicit type-keyword candidates (always code-like)
     if _extract_explicit_type_keyword_candidates(query):
         return True
 
-    # 3c. Explicit usages-pattern candidates (always code-like by intent)
+    # 3b. Explicit usages-pattern candidates (always code-like by intent)
     if _extract_explicit_usages_candidates(query):
         return True
 
-    # 3d. Backtick/quote-enclosed symbols are always code-like
+    # 3c. Backtick/quote-enclosed symbols are always code-like
     enclosed = re.findall(r"[`'\"]([A-Za-z_$][A-Za-z0-9_$]*)['\"`]", query)
     if enclosed:
         return True
 
-    # 3e. Identifier-mode trigger keywords present in query
+    # 3d. Identifier-mode trigger keywords present in query
     identifier_trigger_patterns = [
         "defined", "definition", "declare", "declared", "declaration",
         "implemented", "implementation",
@@ -569,7 +455,7 @@ def is_identifier_query(
     if not has_trigger:
         return False
 
-    # 3f. CODE-LIKENESS GATE: only enter identifier mode if at least one
+    # 3e. CODE-LIKENESS GATE: only enter identifier mode if at least one
     #     extracted candidate is structurally code-like.
     #     This prevents "Where is the main game logic defined?" from
     #     entering identifier mode just because "where is" + "defined" match.
@@ -701,14 +587,7 @@ def extract_identifier_candidates(
         if token not in candidates and token.lower() not in [c.lower() for c in candidates]:
             candidates.append(token)
 
-    # Priority 5 — Explicit definition/declaration tokens
-    #   This deliberately accepts lowercase symbols such as "protect".
-    #   The surrounding phrase is what establishes code-search intent.
-    for token in _extract_explicit_definition_candidates(query):
-        if token not in candidates and token.lower() not in [c.lower() for c in candidates]:
-            candidates.append(token)
-
-    # Priority 6 — Structurally code-like free tokens
+    # Priority 5 — Structurally code-like free tokens
     #   Only accept tokens that pass the is_code_like() check.
     #   This excludes plain lowercase English words.
     raw_identifiers = re.findall(
@@ -866,6 +745,321 @@ def answer_missing_filename_query(
             f"I couldn't find a file named `{candidates[0]}` in the repository."
         ),
         "sources": []
+    }
+
+
+# ============================================================
+# Exact File Code Retrieval
+# ============================================================
+
+def is_file_code_request_query(
+    query: str
+) -> bool:
+    """
+    Detect requests that explicitly ask to show/read the source code of a
+    named repository file.
+
+    This is intentionally separate from is_file_location_query(). A query such
+    as "Show the exact Record.js code that defines the user relationship"
+    should retrieve Record.js itself instead of being routed to semantic RAG
+    or the generic repository-file listing path.
+    """
+    query_lower = query.lower().strip()
+    filename_candidates = extract_filename_candidates(query)
+
+    if not filename_candidates:
+        return False
+
+    code_request_patterns = [
+        "show the exact",
+        "show me the exact",
+        "show exact",
+        "show me",
+        "show the code",
+        "show code",
+        "give me the code",
+        "give the code",
+        "display the code",
+        "exact code",
+        "source code",
+        "code that",
+        "code which",
+        "implementation of",
+        "source of",
+        "read the file",
+        "read file",
+        "open the file",
+        "open file",
+        "file code",
+        "code dikhao",
+        "code batao",
+        "poora code",
+        "pura code",
+    ]
+
+    return any(pattern in query_lower for pattern in code_request_patterns)
+
+
+def _read_repository_file_lines(
+    file_path: str,
+    repository_path: str
+) -> list[str] | None:
+    """Read one repository file as source lines."""
+    absolute_path = os.path.join(
+        repository_path,
+        file_path.replace("/", os.sep)
+    )
+
+    try:
+        with open(
+            absolute_path,
+            "r",
+            encoding="utf-8",
+            errors="replace"
+        ) as file:
+            return file.readlines()
+    except (OSError, UnicodeError):
+        return None
+
+
+def _extract_relevant_code_block(
+    lines: list[str],
+    query: str
+) -> tuple[int, int] | None:
+    """
+    Find the most relevant contiguous source block for relationship/model
+    questions. Returns zero-based [start, end) line indexes.
+
+    The matcher is deliberately conservative. If it cannot identify a clear
+    relationship block, the caller falls back to the complete file instead of
+    inventing a code range.
+    """
+    q = query.lower()
+    relationship_query = any(
+        marker in q
+        for marker in [
+            "relationship",
+            "relation",
+            "references",
+            "reference",
+            "belongs to",
+            "linked to",
+            "associated with",
+            "user relationship",
+            "user relation",
+        ]
+    )
+
+    if not relationship_query:
+        return None
+
+    candidate_indexes = []
+
+    for index, line in enumerate(lines):
+        line_lower = line.lower()
+
+        # Strong Mongoose relationship signals.
+        if (
+            "ref:" in line_lower
+            or "ref =" in line_lower
+            or "mongoose.schema.types.objectid" in line_lower
+            or "schema.types.objectid" in line_lower
+        ):
+            if "user" in line_lower or "user" in q:
+                candidate_indexes.append(index)
+                continue
+
+        # Common nested relationship field.
+        if re.search(r"\buser\s*:\s*\{", line, re.IGNORECASE):
+            candidate_indexes.append(index)
+            continue
+
+        # Other ORM relationship declarations.
+        if re.search(
+            r"\b(?:belongsTo|hasOne|hasMany|references|foreignKey)\b",
+            line,
+            re.IGNORECASE,
+        ):
+            if "user" in line_lower or "user" in q:
+                candidate_indexes.append(index)
+
+    if not candidate_indexes:
+        return None
+
+    target = candidate_indexes[0]
+
+    # Expand upward to the beginning of the nearest object/schema block.
+    start = target
+    brace_depth = 0
+
+    for index in range(target, -1, -1):
+        brace_depth += lines[index].count("{")
+        brace_depth -= lines[index].count("}")
+
+        stripped = lines[index].strip()
+        if index < target and brace_depth > 0 and (
+            "schema" in stripped.lower()
+            or "user:" in stripped.lower()
+            or "{" in stripped
+        ):
+            start = index
+
+        if index < target and brace_depth <= 0:
+            start = index + 1
+            break
+
+    # Expand downward through the enclosing braces. This handles:
+    # user: { type: ObjectId, ref: "User" }
+    # as well as a full field/schema block spread over several lines.
+    end = target + 1
+    depth = 0
+    saw_open_brace = False
+
+    for index in range(target, len(lines)):
+        line = lines[index]
+        opens = line.count("{")
+        closes = line.count("}")
+
+        if opens:
+            saw_open_brace = True
+        depth += opens - closes
+        end = index + 1
+
+        if saw_open_brace and depth <= 0:
+            break
+
+        # Single-line relationship declarations need no extra expansion.
+        if not saw_open_brace and index > target:
+            break
+
+    if end <= start:
+        return None
+
+    return start, end
+
+
+def build_exact_file_code_answer(
+    query: str,
+    repository_path: str
+) -> dict | None:
+    """
+    Return exact source code from a specifically named repository file.
+
+    This path is deterministic and never uses embeddings or the LLM to decide
+    which file to show. If the query asks about a relationship, a conservative
+    relevant block is returned; otherwise the complete file is returned.
+    """
+    candidates = extract_filename_candidates(query)
+    if not candidates:
+        return None
+
+    for candidate in candidates:
+        matches = find_matching_repository_files(candidate, repository_path)
+
+        if not matches:
+            continue
+
+        if len(matches) > 1:
+            file_lines = "\n".join(f"- `{path}`" for path in matches)
+            return {
+                "answer": (
+                    f"I found multiple files named `{candidate}`. "
+                    "Please specify the path:\n\n"
+                    f"{file_lines}"
+                ),
+                "sources": [
+                    {
+                        "file": path,
+                        "language": get_file_language(path),
+                        "start_line": None,
+                        "end_line": None,
+                        "score": 1.0,
+                    }
+                    for path in matches
+                ],
+            }
+
+        file_path = matches[0]
+        lines = _read_repository_file_lines(file_path, repository_path)
+        if lines is None:
+            return {
+                "answer": f"I found `{candidate}`, but I couldn't read its source code.",
+                "sources": [],
+            }
+
+        relevant_range = _extract_relevant_code_block(lines, query)
+
+        if relevant_range:
+            start, end = relevant_range
+            selected_lines = lines[start:end]
+            display_start = start + 1
+            display_end = end
+            heading = f"Exact code from `{file_path}` relevant to your query"
+        else:
+            selected_lines = lines
+            display_start = 1
+            display_end = len(lines)
+            heading = f"Exact source code of `{file_path}`"
+
+        code = "".join(selected_lines)
+
+        # Keep the deterministic response bounded for unusually large files.
+        # We do not truncate normal source files; when truncation is necessary,
+        # the answer explicitly says so and sources still point to the file.
+        max_code_chars = 30000
+        truncated = len(code) > max_code_chars
+        if truncated:
+            code = code[:max_code_chars].rstrip() + "\n... [output truncated]"
+
+        language = get_file_language(file_path)
+        fence_language = {
+            "javascript": "javascript",
+            "typescript": "typescript",
+            "python": "python",
+            "java": "java",
+            "cpp": "cpp",
+            "c": "c",
+            "go": "go",
+            "rust": "rust",
+            "html": "html",
+            "css": "css",
+            "json": "json",
+            "yaml": "yaml",
+            "markdown": "markdown",
+            "shell": "bash",
+            "sql": "sql",
+            "xml": "xml",
+        }.get(str(language).lower(), "")
+
+        answer = (
+            f"{heading} (lines {display_start}-{display_end}):\n\n"
+            f"```{fence_language}\n"
+            f"{code}"
+            f"\n```"
+        )
+
+        if truncated:
+            answer += "\n\nThe displayed code was truncated because the file is unusually large."
+
+        return {
+            "answer": answer,
+            "sources": [
+                {
+                    "file": file_path,
+                    "language": language,
+                    "start_line": display_start,
+                    "end_line": display_end,
+                    "score": 1.0,
+                }
+            ],
+        }
+
+    # The named file was explicitly requested but does not exist.
+    return {
+        "answer": (
+            f"I couldn't find the requested file `{candidates[0]}` in the repository."
+        ),
+        "sources": [],
     }
 
 
@@ -1400,37 +1594,6 @@ def content_match_score(
     return sum(1 for token in tokens if token in content)
 
 
-def query_signal_score(
-    query: str,
-    result
-) -> float:
-    """Heuristic relevance signal used to reject weak semantic matches."""
-    payload = result.payload or {}
-    metadata = payload.get("metadata", {})
-
-    filename = str(metadata.get("filename", "")).lower()
-    relative_path = str(metadata.get("relative_path") or metadata.get("file_path", "")).lower()
-    content = str(payload.get("content", "")).lower()
-
-    if not query or not isinstance(query, str):
-        return 0.0
-
-    score = 0.0
-    tokens = extract_query_tokens(query)
-    if not tokens:
-        return 0.0
-
-    for token in tokens:
-        if token in filename:
-            score += 1.5
-        if token in relative_path:
-            score += 1.25
-        if token in content:
-            score += 1.0
-
-    return score
-
-
 def deduplicate_results(
     results
 ):
@@ -1615,102 +1778,30 @@ def expand_conceptual_query(query: str) -> str:
     expansions = []
 
     concept_aliases = {
-    "payment": [
-        "payment",
-        "order",
-        "verify",
-        "signature",
-        "razorpay",
-        "stripe",
-    ],
-    "payments": [
-        "payment",
-        "order",
-        "verify",
-        "signature",
-        "razorpay",
-        "stripe",
-    ],
-    "authentication": [
-        "auth",
-        "login",
-        "register",
-        "token",
-        "jwt",
-        "refresh token",
-        "middleware",
-    ],
-    "auth": [
-        "login",
-        "register",
-        "token",
-        "jwt",
-        "refresh token",
-        "middleware",
-    ],
-    "seat locking": [
-        "lockSeats",
-        "unlockSeats",
-        "redis",
-        "socket",
-        "seat-lock",
-        "ttl",
-    ],
-    "seat lock": [
-        "lockSeats",
-        "unlockSeats",
-        "redis",
-        "socket",
-        "seat-lock",
-        "ttl",
-    ],
-    "booking": [
-        "booking",
-        "payment",
-        "order",
-        "seat",
-        "razorpay",
-    ],
-    "redis": [
-        "setnx",
-        "ttl",
-        "lock",
-        "unlock",
-        "seat-lock",
-    ],
-    "socket": [
-        "socket.io",
-        "disconnect",
-        "lockSeats",
-        "unlockSeats",
-    ],
-
-    # Transaction / finance domain
-    "transaction": [
-        "transaction",
-        "transactions",
-        "record",
-        "records",
-        "createTransaction",
-        "transactionController",
-        "transactionService",
-        "mongoose",
-        "model",
-        "schema",
-    ],
-    "transactions": [
-        "transaction",
-        "transactions",
-        "record",
-        "records",
-        "createTransaction",
-        "transactionController",
-        "transactionService",
-        "mongoose",
-        "model",
-        "schema",
-    ],
-}
+        "payment": ["payment", "order", "verify", "signature", "razorpay", "stripe"],
+        "payments": ["payment", "order", "verify", "signature", "razorpay", "stripe"],
+        "authentication": ["auth", "login", "register", "token", "jwt", "refresh token", "middleware"],
+        "auth": ["login", "register", "token", "jwt", "refresh token", "middleware"],
+        "seat locking": ["lockSeats", "unlockSeats", "redis", "socket", "seat-lock", "ttl"],
+        "seat lock": ["lockSeats", "unlockSeats", "redis", "socket", "seat-lock", "ttl"],
+        "booking": ["booking", "payment", "order", "seat", "razorpay"],
+        "redis": ["setnx", "ttl", "lock", "unlock", "seat-lock"],
+        "socket": ["socket.io", "disconnect", "lockSeats", "unlockSeats"],
+        "transaction": [
+            "transaction", "transactions", "record", "records",
+            "createTransaction", "createRecord", "addTransaction", "addRecord",
+            "transactionController", "recordController",
+            "transactionService", "recordService",
+            "Transaction", "Record", "mongoose", "model", "schema",
+        ],
+        "transactions": [
+            "transaction", "transactions", "record", "records",
+            "createTransaction", "createRecord", "addTransaction", "addRecord",
+            "transactionController", "recordController",
+            "transactionService", "recordService",
+            "Transaction", "Record", "mongoose", "model", "schema",
+        ],
+    }
 
     for phrase, aliases in concept_aliases.items():
         if phrase in q:
@@ -1721,78 +1812,6 @@ def expand_conceptual_query(query: str) -> str:
 
     return query
 
-def expand_implementation_query(query: str) -> list[str]:
-    """
-    Convert natural-language implementation questions into lightweight
-    repository-search terms.
-
-    This is retrieval-only. It does not assert that any of these terms
-    actually exist in the repository. Final answers must still be grounded
-    in retrieved source code.
-    """
-    q = query.lower()
-
-    terms = []
-
-    implementation_markers = [
-        "implemented",
-        "implementation",
-        "created",
-        "creation",
-        "create",
-        "added",
-        "add",
-        "stored",
-        "save",
-        "saved",
-        "inserted",
-        "insert",
-        "handled",
-        "handle",
-    ]
-
-    if not any(marker in q for marker in implementation_markers):
-        return []
-
-    # General implementation vocabulary.
-    terms.extend([
-        "create",
-        "save",
-        "insert",
-        "update",
-        "controller",
-        "route",
-        "post",
-    ])
-
-    # Financial-record terminology is commonly used for transaction
-    # implementations in this repository.
-    if "transaction" in q or "transactions" in q:
-        terms.extend([
-            "transaction",
-            "record",
-            "createRecord",
-            "recordController",
-            "recordRoutes",
-        ])
-
-    if "payment" in q or "payments" in q:
-        terms.extend([
-            "payment",
-            "order",
-            "verify",
-            "razorpay",
-        ])
-
-    if "booking" in q or "bookings" in q:
-        terms.extend([
-            "booking",
-            "createBooking",
-            "bookingController",
-            "bookingRoutes",
-        ])
-
-    return list(dict.fromkeys(terms))
 
 def _lexical_results_as_objects(
     query: str,
@@ -1805,11 +1824,7 @@ def _lexical_results_as_objects(
     lexical_matches = search_repository_text(query, repository_path)
     results = []
 
-    eligible_matches = [
-        match for match in lexical_matches
-        if _is_eligible_evidence_path(match.get("file", ""))
-    ]
-    for match in eligible_matches[:limit]:
+    for match in lexical_matches[:limit]:
         payload = {
             "content": match.get("content", ""),
             "metadata": {
@@ -1838,13 +1853,6 @@ def search_code(
 ):
     """
     Perform semantic vector search + keyword ranking across repository chunks.
-
-    Semantic retrieval remains the primary retrieval mechanism.
-    Conceptual and implementation-oriented queries also receive a
-    deterministic lexical retrieval pass so natural-language concepts such
-    as "transaction creation" can find repository-specific identifiers such
-    as "createRecord" and "recordController".
-
     Lazy imports vector_store and embeddings.
     """
     if not query or not query.strip():
@@ -1857,26 +1865,12 @@ def search_code(
     from rag.embeddings import generate_embedding
 
     collection_name = get_collection_name(repository_path)
-
     if not client.collection_exists(collection_name):
         raise ValueError(f"Repository is not indexed: {repository_path}")
 
-    # ------------------------------------------------------------
-    # Build the semantic retrieval query
-    # ------------------------------------------------------------
-
-    retrieval_query = (
-        expand_conceptual_query(query)
-        if is_conceptual_query(query)
-        else query
-    )
-
+    retrieval_query = expand_conceptual_query(query) if is_conceptual_query(query) else query
     query_vector = generate_embedding(retrieval_query)
-
-    retrieval_limit = max(
-        limit * 5,
-        SEMANTIC_RETRIEVAL_LIMIT
-    )
+    retrieval_limit = max(limit * 5, SEMANTIC_RETRIEVAL_LIMIT)
 
     results = client.query_points(
         collection_name=collection_name,
@@ -1884,314 +1878,71 @@ def search_code(
         limit=retrieval_limit
     ).points
 
-    # ------------------------------------------------------------
-    # Initial semantic filtering
-    # ------------------------------------------------------------
-
     relevant_results = [
-        r
-        for r in results
+        r for r in results
         if r.score >= SIMILARITY_THRESHOLD
     ]
 
-    relevant_results = [
-        result
-        for result in relevant_results
-        if _is_eligible_evidence_path(
-            (result.payload or {}).get("metadata", {}).get("relative_path")
-            or (result.payload or {}).get("metadata", {}).get("file_path", "")
-        )
-    ]
-
-    # Semantic-only hits must still contain some evidence-bearing
-    # signal from the query.
-    relevant_results = [
-        result
-        for result in relevant_results
-        if (
-            query_signal_score(query, result) > 0
-            or keyword_matches(query, result) > 0
-            or content_match_score(query, result) > 0
-        )
-    ]
-
-    # ------------------------------------------------------------
-    # Deterministic lexical retrieval
-    # ------------------------------------------------------------
-    #
-    # This is important for natural-language implementation questions.
-    #
-    # Example:
-    #
-    #   "Where is transaction creation implemented?"
-    #
-    # The repository may use:
-    #
-    #   createRecord
-    #   recordController.js
-    #   recordRoutes.js
-    #
-    # rather than the literal phrase "transaction creation".
-    #
-    # The expansion function translates the user's terminology into
-    # retrieval vocabulary without making any claim about what exists.
-    # ------------------------------------------------------------
-
-    lexical_queries = []
-
+    # Semantic retrieval is primary. For conceptual questions, add a small
+    # deterministic lexical pass so important exact terms/files are not lost
+    # simply because their embedding score is lower.
     if is_conceptual_query(query):
-        lexical_queries.append(
-            expand_conceptual_query(query)
-        )
-
-    implementation_terms = expand_implementation_query(query)
-
-    for term in implementation_terms:
-        lexical_queries.append(term)
-
-    # Remove duplicate retrieval queries while preserving order.
-    lexical_queries = list(dict.fromkeys(
-        term
-        for term in lexical_queries
-        if term and term.strip()
-    ))
-
-    for lexical_query in lexical_queries:
-
+        lexical_query = expand_conceptual_query(query)
         lexical_results = _lexical_results_as_objects(
             lexical_query,
             repository_path,
             limit=24,
         )
-
-        lexical_results = [
-            result
-            for result in lexical_results
-            if _is_eligible_evidence_path(
-                (result.payload or {}).get("metadata", {}).get("relative_path")
-                or (result.payload or {}).get("metadata", {}).get("file_path", "")
-            )
-        ]
-
         relevant_results.extend(lexical_results)
 
-    # ------------------------------------------------------------
-    # Rank all retrieved evidence
-    # ------------------------------------------------------------
-
     ranked_results = []
-
     for r in relevant_results:
-
         semantic_score = float(r.score)
-
-        keyword_score = keyword_matches(
-            query,
-            r
-        )
-
-        exact_content_matches = content_match_score(
-            query,
-            r
-        )
-
-        signal_score = query_signal_score(
-            query,
-            r
-        )
+        keyword_score = keyword_matches(query, r)
+        exact_content_matches = content_match_score(query, r)
 
         final_score = (
             semantic_score
             + (keyword_score * 0.01)
             + (exact_content_matches * 0.08)
-            + (signal_score * 0.04)
         )
+        ranked_results.append((final_score, r))
 
-        ranked_results.append(
-            (final_score, r)
-        )
+    ranked_results.sort(key=lambda item: item[0], reverse=True)
+    ordered_results = [r for _, r in ranked_results]
+    unique_results = deduplicate_results(ordered_results)
 
-    ranked_results.sort(
-        key=lambda item: item[0],
-        reverse=True
-    )
-
-    ordered_results = [
-        r
-        for _, r in ranked_results
-    ]
-
-    # ------------------------------------------------------------
-    # Remove duplicate evidence
-    # ------------------------------------------------------------
-
-    unique_results = deduplicate_results(
-        ordered_results
-    )
-
-    # ------------------------------------------------------------
-    # Filename-aware boosting
-    # ------------------------------------------------------------
-
-    filename_candidates = extract_filename_candidates(
-        query
-    )
-
+    filename_candidates = extract_filename_candidates(query)
     if filename_candidates:
-
-        normalized_candidates = {
-            candidate.lower()
-            for candidate in filename_candidates
-        }
-
+        normalized_candidates = {c.lower() for c in filename_candidates}
         boosted_results = []
 
         for r in unique_results:
-
             payload = r.payload or {}
             metadata = payload.get("metadata", {})
-
-            file_path = (
-                metadata.get("relative_path")
-                or metadata.get("file_path")
-                or ""
-            )
-
-            basename = os.path.basename(
-                str(file_path)
-            ).lower()
-
-            filename_boost = (
-                1
-                if basename in normalized_candidates
-                else 0
-            )
-
-            boosted_results.append(
-                (filename_boost, r)
-            )
+            file_path = metadata.get("relative_path") or metadata.get("file_path") or ""
+            basename = os.path.basename(str(file_path)).lower()
+            filename_boost = 1 if basename in normalized_candidates else 0
+            boosted_results.append((filename_boost, r))
 
         boosted_results.sort(
-            key=lambda item: (
-                item[0],
-                item[1].score
-            ),
+            key=lambda item: (item[0], item[1].score),
             reverse=True
         )
-
-        unique_results = [
-            r
-            for _, r in boosted_results
-        ]
-
-        max_per_file = (
-            8
-            if is_conceptual_query(query)
-            else 6
-        )
-
-        diversified_results = diversify_results(
-            unique_results,
-            max_per_file=max_per_file
-        )
-
+        unique_results = [r for _, r in boosted_results]
+        max_per_file = 8 if is_conceptual_query(query) else 6
+        diversified_results = diversify_results(unique_results, max_per_file=max_per_file)
     else:
+        max_per_file = 5 if is_conceptual_query(query) else 3
+        diversified_results = diversify_results(unique_results, max_per_file=max_per_file)
 
-        max_per_file = (
-            5
-            if is_conceptual_query(query)
-            else 3
-        )
-
-        diversified_results = diversify_results(
-            unique_results,
-            max_per_file=max_per_file
-        )
-
-    # ------------------------------------------------------------
-    # Final result limit
-    # ------------------------------------------------------------
-
-    result_limit = (
-        CONCEPTUAL_MAX_RESULTS
-        if is_conceptual_query(query)
-        else limit
-    )
-
+    result_limit = CONCEPTUAL_MAX_RESULTS if is_conceptual_query(query) else limit
     return diversified_results[:result_limit]
 
 
 # ============================================================
 # Context Construction
 # ============================================================
-
-def _read_source_evidence(result, repository_path: str) -> dict | None:
-    """Resolve a retrieved chunk to a current, repository-contained line range."""
-    payload = result.payload or {}
-    metadata = payload.get("metadata", {})
-    raw_path = metadata.get("relative_path") or metadata.get("file_path")
-    if not raw_path:
-        return None
-
-    raw_path = str(raw_path)
-    if os.path.isabs(raw_path):
-        relative_path = clean_source_path(raw_path, repository_path)
-    else:
-        relative_path = raw_path.replace("\\", "/")
-
-    relative_path = os.path.normpath(relative_path).replace("\\", "/")
-    if (
-        not relative_path
-        or relative_path == "."
-        or relative_path.startswith("../")
-        or relative_path == ".."
-        or os.path.isabs(relative_path)
-        or not _is_eligible_evidence_path(relative_path)
-    ):
-        return None
-
-    repository_root = os.path.realpath(repository_path)
-    absolute_path = os.path.realpath(
-        os.path.join(repository_root, relative_path.replace("/", os.sep))
-    )
-    try:
-        if os.path.commonpath([repository_root, absolute_path]) != repository_root:
-            return None
-    except ValueError:
-        return None
-
-    try:
-        with open(absolute_path, "r", encoding="utf-8", errors="replace") as source_file:
-            source_lines = source_file.readlines()
-    except OSError:
-        return None
-
-    start_line = metadata.get("start_line")
-    end_line = metadata.get("end_line")
-    if (
-        isinstance(start_line, bool)
-        or isinstance(end_line, bool)
-        or not isinstance(start_line, int)
-        or not isinstance(end_line, int)
-        or start_line < 1
-        or end_line < start_line
-        or end_line > len(source_lines)
-    ):
-        return None
-
-    content = "".join(source_lines[start_line - 1:end_line]).rstrip()
-    if not content.strip():
-        return None
-
-    return {
-        "file": relative_path,
-        "language": metadata.get("language") or get_file_language(relative_path),
-        "start_line": start_line,
-        "end_line": end_line,
-        "score": float(result.score),
-        "content": content,
-    }
-
 
 def build_context(
     results,
@@ -2202,31 +1953,49 @@ def build_context(
     current_size = 0
 
     for result in results:
-        source = _read_source_evidence(result, repository_path)
-        if source is None:
+        payload = result.payload or {}
+        if not payload:
             continue
 
-        evidence_id = len(sources) + 1
+        metadata = payload.get("metadata", {})
+        content = str(payload.get("content", ""))
+        if not content.strip():
+            continue
+
+        file_path = metadata.get("relative_path") or metadata.get("file_path") or "Unknown file"
+        if not metadata.get("relative_path"):
+            file_path = clean_source_path(file_path, repository_path)
+
+        language = metadata.get("language", "unknown")
+        start_line = metadata.get("start_line")
+        end_line = metadata.get("end_line")
+
         block = (
-            f"[Evidence ID: {evidence_id}]\n"
-            f"File: {source['file']}\n"
-            f"Language: {source['language']}\n"
-            f"Lines: {source['start_line']} - {source['end_line']}\n"
+            f"File: {file_path}\n"
+            f"Language: {language}\n"
+            f"Lines: {start_line} - {end_line}\n"
             f"Code:\n\n"
-            f"{source['content']}\n\n"
+            f"{content}\n\n"
         )
 
         remaining = MAX_CONTEXT_CHARS - current_size
         if remaining <= 0:
             break
+
         if len(block) > remaining:
-            continue
+            if remaining < 500:
+                break
+            block = block[:remaining]
 
         context_parts.append(block)
         current_size += len(block)
+
         sources.append({
-            "evidence_id": evidence_id,
-            **source,
+            "file": file_path,
+            "language": language,
+            "start_line": start_line,
+            "end_line": end_line,
+            "score": float(result.score),
         })
 
     return "\n".join(context_parts), sources
@@ -2277,6 +2046,7 @@ def answer_query(
         }
 
     mode = (mode or "auto").strip().lower()
+
     if mode not in {"auto", "exact", "semantic"}:
         mode = "auto"
 
@@ -2296,41 +2066,76 @@ def answer_query(
         return build_repository_structure_answer(repository_path)
 
     # --------------------------------------------------------
-    # 2. Language-specific file listing
+    # 2. Exact file source-code retrieval
     # --------------------------------------------------------
-    language_filter = detect_language_filter(retrieval_query)
-    if language_filter:
-        return build_repository_file_answer(repository_path, language_filter)
+    # IMPORTANT:
+    # This MUST happen before generic file-listing detection.
+    #
+    # Example:
+    # "Show the exact Record.js code that defines the user relationship."
+    #
+    # is_repository_file_query() may recognize "show" and incorrectly
+    # return the complete repository file list.
+    #
+    # Therefore, explicit source-code requests get priority here.
+    if is_file_code_request_query(retrieval_query):
+        exact_file_result = build_exact_file_code_answer(
+            retrieval_query,
+            repository_path
+        )
+
+        if exact_file_result:
+            return exact_file_result
 
     # --------------------------------------------------------
-    # 3. Generic repository file listing
+    # 3. Language-specific file listing
+    # --------------------------------------------------------
+    language_filter = detect_language_filter(retrieval_query)
+
+    if language_filter:
+        return build_repository_file_answer(
+            repository_path,
+            language_filter
+        )
+
+    # --------------------------------------------------------
+    # 4. Generic repository file listing
     # --------------------------------------------------------
     if is_repository_file_query(retrieval_query):
         return build_repository_file_answer(repository_path)
 
     # --------------------------------------------------------
-    # 4. Exact filename location
+    # 5. Exact filename location
     # --------------------------------------------------------
     filename_candidates = extract_filename_candidates(retrieval_query)
+
     if filename_candidates and is_file_location_query(retrieval_query):
-        location_result = find_file_location(retrieval_query, repository_path)
+        location_result = find_file_location(
+            retrieval_query,
+            repository_path
+        )
+
         if location_result:
             return location_result
 
-        missing_result = answer_missing_filename_query(retrieval_query, repository_path)
+        missing_result = answer_missing_filename_query(
+            retrieval_query,
+            repository_path
+        )
+
         if missing_result:
             return missing_result
 
     # --------------------------------------------------------
-    # 5. Exact identifier search
+    # 6. Exact identifier search
     # --------------------------------------------------------
-    # Explicit semantic mode is intended for conceptual questions. Auto/exact
-    # still use deterministic identifier search when the query clearly names a
-    # code symbol.
+    # Explicit semantic mode is intended for conceptual questions.
+    # Auto/exact still use deterministic identifier search when the
+    # query clearly names a code symbol.
     should_run_identifier_search = (
-        mode != "semantic" and
-        not conceptual and
-        is_identifier_query(retrieval_query)
+        mode != "semantic"
+        and not conceptual
+        and is_identifier_query(retrieval_query)
     )
 
     if should_run_identifier_search:
@@ -2344,52 +2149,80 @@ def answer_query(
 
         # Missing identifier -> return a deterministic negative answer.
         candidates = extract_identifier_candidates(retrieval_query)
+
         if candidates:
+            missing_id = candidates[0]
+
             return {
-                "answer": INSUFFICIENT_EVIDENCE_RESPONSE,
+                "answer": (
+                    f"I couldn't find the identifier `{missing_id}` "
+                    "in the repository."
+                ),
                 "sources": []
             }
 
     # --------------------------------------------------------
-    # 6. Hybrid semantic RAG
+    # 7. Hybrid semantic RAG
     # --------------------------------------------------------
     try:
         results = search_code(
             query=retrieval_query,
             repository_path=repository_path,
-            limit=(CONCEPTUAL_MAX_RESULTS if conceptual else limit),
+            limit=(
+                CONCEPTUAL_MAX_RESULTS
+                if conceptual
+                else limit
+            ),
         )
+
     except ValueError as error:
         return {
             "answer": str(error),
             "sources": []
         }
+
     except Exception as error:
-        logger.exception("Semantic retrieval failed: %s", error)
+        print("Semantic retrieval error:", error)
+
         return {
-            "answer": INSUFFICIENT_EVIDENCE_RESPONSE,
+            "answer": (
+                "The repository search could not be completed. "
+                "Please check the backend logs."
+            ),
             "sources": []
         }
 
     if not results:
         return {
-            "answer": INSUFFICIENT_EVIDENCE_RESPONSE,
+            "answer": (
+                "I couldn't find enough relevant information "
+                "in the codebase."
+            ),
             "sources": []
         }
 
     # --------------------------------------------------------
-    # 7. Context + generation
+    # 8. Context + generation
     # --------------------------------------------------------
-    context, sources = build_context(results, repository_path)
+    context, sources = build_context(
+        results,
+        repository_path
+    )
+
     if not context.strip():
         return {
-            "answer": INSUFFICIENT_EVIDENCE_RESPONSE,
+            "answer": (
+                "I couldn't find enough relevant information "
+                "in the codebase."
+            ),
             "sources": []
         }
 
-    # For follow-up questions, include the previous conversation in the
-    # generation prompt without contaminating the repository retrieval query.
+    # For follow-up questions, include the previous conversation
+    # in the generation prompt without contaminating the repository
+    # retrieval query.
     generation_query = query
+
     if conversation_context:
         generation_query = f"""
 Previous conversation:
@@ -2402,32 +2235,14 @@ Repository retrieval query:
 {retrieval_query}
 """.strip()
 
-    from rag.generator import generate_grounded_answer
-    generated = generate_grounded_answer(
-        query=generation_query,
-        context=context,
-        sources=sources,
-    )
-    answer = generated["answer"]
-    cited_ids = set(generated["evidence_ids"])
-    selected_sources = [
-        {
-            key: value
-            for key, value in source.items()
-            if key not in {"evidence_id", "content"}
-            and source["evidence_id"] in cited_ids
-        }
-        for source in sources
-        if source["evidence_id"] in cited_ids
-    ]
+    from rag.generator import generate_answer
 
-    if answer.strip() == INSUFFICIENT_EVIDENCE_RESPONSE or not selected_sources:
-        return {
-            "answer": INSUFFICIENT_EVIDENCE_RESPONSE,
-            "sources": [],
-        }
+    answer = generate_answer(
+        generation_query,
+        context
+    )
 
     return {
         "answer": answer,
-        "sources": selected_sources
+        "sources": sources
     }
