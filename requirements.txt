@@ -4,3 +4,9 @@ sentence-transformers
 qdrant-client
 python-dotenv
 groq
+
+tree-sitter
+tree-sitter-javascript
+
+pytest
+httpx

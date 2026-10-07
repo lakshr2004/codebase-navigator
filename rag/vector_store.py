@@ -36,14 +36,27 @@ logger = logging.getLogger(__name__)
 def get_client() -> QdrantClient:
     """
     Get or create the shared QdrantClient instance.
+
+    Uses a remote Qdrant URL when QDRANT_URL is configured.
+    Otherwise falls back to the local filesystem-based Qdrant instance.
     """
     global _client_instance
-    if _client_instance is None:
-        qdrant_path = get_runtime_config()["qdrant_path"]
-        os.makedirs(qdrant_path, exist_ok=True)
-        _client_instance = QdrantClient(path=qdrant_path)
-    return _client_instance
 
+    if _client_instance is None:
+        config = get_runtime_config()
+
+        qdrant_url = config["qdrant_url"]
+        qdrant_path = config["qdrant_path"]
+
+        if qdrant_url:
+            logger.info("Using remote Qdrant instance: %s", qdrant_url)
+            _client_instance = QdrantClient(url=qdrant_url)
+        else:
+            os.makedirs(qdrant_path, exist_ok=True)
+            logger.info("Using local Qdrant instance: %s", qdrant_path)
+            _client_instance = QdrantClient(path=qdrant_path)
+
+    return _client_instance
 
 def close_client():
     """

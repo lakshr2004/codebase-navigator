@@ -133,14 +133,15 @@ I couldn't find enough information in the codebase.
 
         try:
             response = self.client.chat.completions.create(
-                model=MODEL_NAME,
-                messages=[
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": user_prompt},
-                ],
-                temperature=0,
-                max_tokens=MAX_OUTPUT_TOKENS,
-            )
+    model=MODEL_NAME,
+    messages=[
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": user_prompt},
+    ],
+    temperature=0,
+    reasoning_effort="low",
+    max_completion_tokens=MAX_OUTPUT_TOKENS,
+)
         except Exception as exc:
             raise LLMProviderError(f"LLM provider request failed: {exc}") from exc
 
@@ -230,7 +231,7 @@ MODEL_NAME = "openai/gpt-oss-20b"
 MAX_CONTEXT_CHARS = 10000
 MAX_QUERY_CHARS = 1000
 MAX_HISTORY_CHARS = 1500
-MAX_OUTPUT_TOKENS = 500
+MAX_OUTPUT_TOKENS = 1024
 
 FALLBACK_RESPONSE = (
     "I couldn't find enough information in the codebase."
