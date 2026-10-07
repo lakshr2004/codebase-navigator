@@ -1615,102 +1615,16 @@ def expand_conceptual_query(query: str) -> str:
     expansions = []
 
     concept_aliases = {
-    "payment": [
-        "payment",
-        "order",
-        "verify",
-        "signature",
-        "razorpay",
-        "stripe",
-    ],
-    "payments": [
-        "payment",
-        "order",
-        "verify",
-        "signature",
-        "razorpay",
-        "stripe",
-    ],
-    "authentication": [
-        "auth",
-        "login",
-        "register",
-        "token",
-        "jwt",
-        "refresh token",
-        "middleware",
-    ],
-    "auth": [
-        "login",
-        "register",
-        "token",
-        "jwt",
-        "refresh token",
-        "middleware",
-    ],
-    "seat locking": [
-        "lockSeats",
-        "unlockSeats",
-        "redis",
-        "socket",
-        "seat-lock",
-        "ttl",
-    ],
-    "seat lock": [
-        "lockSeats",
-        "unlockSeats",
-        "redis",
-        "socket",
-        "seat-lock",
-        "ttl",
-    ],
-    "booking": [
-        "booking",
-        "payment",
-        "order",
-        "seat",
-        "razorpay",
-    ],
-    "redis": [
-        "setnx",
-        "ttl",
-        "lock",
-        "unlock",
-        "seat-lock",
-    ],
-    "socket": [
-        "socket.io",
-        "disconnect",
-        "lockSeats",
-        "unlockSeats",
-    ],
-
-    # Transaction / finance domain
-    "transaction": [
-        "transaction",
-        "transactions",
-        "record",
-        "records",
-        "createTransaction",
-        "transactionController",
-        "transactionService",
-        "mongoose",
-        "model",
-        "schema",
-    ],
-    "transactions": [
-        "transaction",
-        "transactions",
-        "record",
-        "records",
-        "createTransaction",
-        "transactionController",
-        "transactionService",
-        "mongoose",
-        "model",
-        "schema",
-    ],
-}
+        "payment": ["payment", "order", "verify", "signature", "razorpay", "stripe"],
+        "payments": ["payment", "order", "verify", "signature", "razorpay", "stripe"],
+        "authentication": ["auth", "login", "register", "token", "jwt", "refresh token", "middleware"],
+        "auth": ["login", "register", "token", "jwt", "refresh token", "middleware"],
+        "seat locking": ["lockSeats", "unlockSeats", "redis", "socket", "seat-lock", "ttl"],
+        "seat lock": ["lockSeats", "unlockSeats", "redis", "socket", "seat-lock", "ttl"],
+        "booking": ["booking", "payment", "order", "seat", "razorpay"],
+        "redis": ["setnx", "ttl", "lock", "unlock", "seat-lock"],
+        "socket": ["socket.io", "disconnect", "lockSeats", "unlockSeats"],
+    }
 
     for phrase, aliases in concept_aliases.items():
         if phrase in q:
@@ -1721,78 +1635,6 @@ def expand_conceptual_query(query: str) -> str:
 
     return query
 
-def expand_implementation_query(query: str) -> list[str]:
-    """
-    Convert natural-language implementation questions into lightweight
-    repository-search terms.
-
-    This is retrieval-only. It does not assert that any of these terms
-    actually exist in the repository. Final answers must still be grounded
-    in retrieved source code.
-    """
-    q = query.lower()
-
-    terms = []
-
-    implementation_markers = [
-        "implemented",
-        "implementation",
-        "created",
-        "creation",
-        "create",
-        "added",
-        "add",
-        "stored",
-        "save",
-        "saved",
-        "inserted",
-        "insert",
-        "handled",
-        "handle",
-    ]
-
-    if not any(marker in q for marker in implementation_markers):
-        return []
-
-    # General implementation vocabulary.
-    terms.extend([
-        "create",
-        "save",
-        "insert",
-        "update",
-        "controller",
-        "route",
-        "post",
-    ])
-
-    # Financial-record terminology is commonly used for transaction
-    # implementations in this repository.
-    if "transaction" in q or "transactions" in q:
-        terms.extend([
-            "transaction",
-            "record",
-            "createRecord",
-            "recordController",
-            "recordRoutes",
-        ])
-
-    if "payment" in q or "payments" in q:
-        terms.extend([
-            "payment",
-            "order",
-            "verify",
-            "razorpay",
-        ])
-
-    if "booking" in q or "bookings" in q:
-        terms.extend([
-            "booking",
-            "createBooking",
-            "bookingController",
-            "bookingRoutes",
-        ])
-
-    return list(dict.fromkeys(terms))
 
 def _lexical_results_as_objects(
     query: str,
@@ -1838,13 +1680,6 @@ def search_code(
 ):
     """
     Perform semantic vector search + keyword ranking across repository chunks.
-
-    Semantic retrieval remains the primary retrieval mechanism.
-    Conceptual and implementation-oriented queries also receive a
-    deterministic lexical retrieval pass so natural-language concepts such
-    as "transaction creation" can find repository-specific identifiers such
-    as "createRecord" and "recordController".
-
     Lazy imports vector_store and embeddings.
     """
     if not query or not query.strip():
@@ -1857,26 +1692,12 @@ def search_code(
     from rag.embeddings import generate_embedding
 
     collection_name = get_collection_name(repository_path)
-
     if not client.collection_exists(collection_name):
         raise ValueError(f"Repository is not indexed: {repository_path}")
 
-    # ------------------------------------------------------------
-    # Build the semantic retrieval query
-    # ------------------------------------------------------------
-
-    retrieval_query = (
-        expand_conceptual_query(query)
-        if is_conceptual_query(query)
-        else query
-    )
-
+    retrieval_query = expand_conceptual_query(query) if is_conceptual_query(query) else query
     query_vector = generate_embedding(retrieval_query)
-
-    retrieval_limit = max(
-        limit * 5,
-        SEMANTIC_RETRIEVAL_LIMIT
-    )
+    retrieval_limit = max(limit * 5, SEMANTIC_RETRIEVAL_LIMIT)
 
     results = client.query_points(
         collection_name=collection_name,
@@ -1884,121 +1705,53 @@ def search_code(
         limit=retrieval_limit
     ).points
 
-    # ------------------------------------------------------------
-    # Initial semantic filtering
-    # ------------------------------------------------------------
-
     relevant_results = [
-        r
-        for r in results
+        r for r in results
         if r.score >= SIMILARITY_THRESHOLD
     ]
-
     relevant_results = [
-        result
-        for result in relevant_results
+        result for result in relevant_results
         if _is_eligible_evidence_path(
             (result.payload or {}).get("metadata", {}).get("relative_path")
             or (result.payload or {}).get("metadata", {}).get("file_path", "")
         )
     ]
 
-    # Semantic-only hits must still contain some evidence-bearing
-    # signal from the query.
+    # Semantic-only hits must still carry at least some evidence-bearing signal
+    # from the query itself. This prevents generic low-similarity matches from
+    # being treated as repository evidence when the codebase truly has no
+    # matching implementation.
     relevant_results = [
-        result
-        for result in relevant_results
-        if (
-            query_signal_score(query, result) > 0
-            or keyword_matches(query, result) > 0
-            or content_match_score(query, result) > 0
-        )
+        result for result in relevant_results
+        if query_signal_score(query, result) > 0
+        or keyword_matches(query, result) > 0
+        or content_match_score(query, result) > 0
     ]
 
-    # ------------------------------------------------------------
-    # Deterministic lexical retrieval
-    # ------------------------------------------------------------
-    #
-    # This is important for natural-language implementation questions.
-    #
-    # Example:
-    #
-    #   "Where is transaction creation implemented?"
-    #
-    # The repository may use:
-    #
-    #   createRecord
-    #   recordController.js
-    #   recordRoutes.js
-    #
-    # rather than the literal phrase "transaction creation".
-    #
-    # The expansion function translates the user's terminology into
-    # retrieval vocabulary without making any claim about what exists.
-    # ------------------------------------------------------------
-
-    lexical_queries = []
-
+    # Semantic retrieval is primary. For conceptual questions, add a small
+    # deterministic lexical pass so important exact terms/files are not lost
+    # simply because their embedding score is lower.
     if is_conceptual_query(query):
-        lexical_queries.append(
-            expand_conceptual_query(query)
-        )
-
-    implementation_terms = expand_implementation_query(query)
-
-    for term in implementation_terms:
-        lexical_queries.append(term)
-
-    # Remove duplicate retrieval queries while preserving order.
-    lexical_queries = list(dict.fromkeys(
-        term
-        for term in lexical_queries
-        if term and term.strip()
-    ))
-
-    for lexical_query in lexical_queries:
-
+        lexical_query = expand_conceptual_query(query)
         lexical_results = _lexical_results_as_objects(
             lexical_query,
             repository_path,
             limit=24,
         )
-
         lexical_results = [
-            result
-            for result in lexical_results
-            if _is_eligible_evidence_path(
-                (result.payload or {}).get("metadata", {}).get("relative_path")
-                or (result.payload or {}).get("metadata", {}).get("file_path", "")
-            )
+            result for result in lexical_results
+            if query_signal_score(lexical_query, result) > 0
+            or keyword_matches(lexical_query, result) > 0
+            or content_match_score(lexical_query, result) > 0
         ]
-
         relevant_results.extend(lexical_results)
 
-    # ------------------------------------------------------------
-    # Rank all retrieved evidence
-    # ------------------------------------------------------------
-
     ranked_results = []
-
     for r in relevant_results:
-
         semantic_score = float(r.score)
-
-        keyword_score = keyword_matches(
-            query,
-            r
-        )
-
-        exact_content_matches = content_match_score(
-            query,
-            r
-        )
-
-        signal_score = query_signal_score(
-            query,
-            r
-        )
+        keyword_score = keyword_matches(query, r)
+        exact_content_matches = content_match_score(query, r)
+        signal_score = query_signal_score(query, r)
 
         final_score = (
             semantic_score
@@ -2006,118 +1759,37 @@ def search_code(
             + (exact_content_matches * 0.08)
             + (signal_score * 0.04)
         )
+        ranked_results.append((final_score, r))
 
-        ranked_results.append(
-            (final_score, r)
-        )
+    ranked_results.sort(key=lambda item: item[0], reverse=True)
+    ordered_results = [r for _, r in ranked_results]
+    unique_results = deduplicate_results(ordered_results)
 
-    ranked_results.sort(
-        key=lambda item: item[0],
-        reverse=True
-    )
-
-    ordered_results = [
-        r
-        for _, r in ranked_results
-    ]
-
-    # ------------------------------------------------------------
-    # Remove duplicate evidence
-    # ------------------------------------------------------------
-
-    unique_results = deduplicate_results(
-        ordered_results
-    )
-
-    # ------------------------------------------------------------
-    # Filename-aware boosting
-    # ------------------------------------------------------------
-
-    filename_candidates = extract_filename_candidates(
-        query
-    )
-
+    filename_candidates = extract_filename_candidates(query)
     if filename_candidates:
-
-        normalized_candidates = {
-            candidate.lower()
-            for candidate in filename_candidates
-        }
-
+        normalized_candidates = {c.lower() for c in filename_candidates}
         boosted_results = []
 
         for r in unique_results:
-
             payload = r.payload or {}
             metadata = payload.get("metadata", {})
-
-            file_path = (
-                metadata.get("relative_path")
-                or metadata.get("file_path")
-                or ""
-            )
-
-            basename = os.path.basename(
-                str(file_path)
-            ).lower()
-
-            filename_boost = (
-                1
-                if basename in normalized_candidates
-                else 0
-            )
-
-            boosted_results.append(
-                (filename_boost, r)
-            )
+            file_path = metadata.get("relative_path") or metadata.get("file_path") or ""
+            basename = os.path.basename(str(file_path)).lower()
+            filename_boost = 1 if basename in normalized_candidates else 0
+            boosted_results.append((filename_boost, r))
 
         boosted_results.sort(
-            key=lambda item: (
-                item[0],
-                item[1].score
-            ),
+            key=lambda item: (item[0], item[1].score),
             reverse=True
         )
-
-        unique_results = [
-            r
-            for _, r in boosted_results
-        ]
-
-        max_per_file = (
-            8
-            if is_conceptual_query(query)
-            else 6
-        )
-
-        diversified_results = diversify_results(
-            unique_results,
-            max_per_file=max_per_file
-        )
-
+        unique_results = [r for _, r in boosted_results]
+        max_per_file = 8 if is_conceptual_query(query) else 6
+        diversified_results = diversify_results(unique_results, max_per_file=max_per_file)
     else:
+        max_per_file = 5 if is_conceptual_query(query) else 3
+        diversified_results = diversify_results(unique_results, max_per_file=max_per_file)
 
-        max_per_file = (
-            5
-            if is_conceptual_query(query)
-            else 3
-        )
-
-        diversified_results = diversify_results(
-            unique_results,
-            max_per_file=max_per_file
-        )
-
-    # ------------------------------------------------------------
-    # Final result limit
-    # ------------------------------------------------------------
-
-    result_limit = (
-        CONCEPTUAL_MAX_RESULTS
-        if is_conceptual_query(query)
-        else limit
-    )
-
+    result_limit = CONCEPTUAL_MAX_RESULTS if is_conceptual_query(query) else limit
     return diversified_results[:result_limit]
 
 
