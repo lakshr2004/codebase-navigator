@@ -37,14 +37,23 @@ function renderAnswer(answer) {
   const parts = answer.split(/(```[\s\S]*?```)/g)
 
   return parts.map((part, index) => {
-    if (part.startsWith('```') && part.endsWith('```')) {
+    // --------------------------------------------------------
+    // Code block
+    // --------------------------------------------------------
+    if (
+      part.startsWith('```') &&
+      part.endsWith('```')
+    ) {
       const codeBlock = part
-        .replace(/^```[a-zA-Z0-9+#.-]*\s*/, '')
+        .replace(/^```[a-zA-Z0-9+#._-]*\s*/, '')
         .replace(/```$/, '')
         .trimEnd()
 
       return (
-        <pre className="answer-code" key={index}>
+        <pre
+          className="answer-code"
+          key={`code-${index}`}
+        >
           <code>{codeBlock}</code>
         </pre>
       )
@@ -56,13 +65,104 @@ function renderAnswer(answer) {
       return null
     }
 
+    // --------------------------------------------------------
+    // Render normal answer content line-by-line
+    // --------------------------------------------------------
+
+    const lines = text.split('\n')
+
     return (
-      <p key={index}>
-        {text}
-      </p>
+      <div
+        className="answer-text-block"
+        key={`text-${index}`}
+      >
+        {lines.map((line, lineIndex) => {
+          const trimmedLine = line.trim()
+
+          if (!trimmedLine) {
+            return (
+              <div
+                className="answer-spacer"
+                key={`space-${lineIndex}`}
+              />
+            )
+          }
+
+          // Markdown-style heading
+          if (trimmedLine.startsWith('### ')) {
+            return (
+              <h4 key={`heading-${lineIndex}`}>
+                {trimmedLine.slice(4)}
+              </h4>
+            )
+          }
+
+          if (trimmedLine.startsWith('## ')) {
+            return (
+              <h3 key={`heading-${lineIndex}`}>
+                {trimmedLine.slice(3)}
+              </h3>
+            )
+          }
+
+          if (trimmedLine.startsWith('# ')) {
+            return (
+              <h2 key={`heading-${lineIndex}`}>
+                {trimmedLine.slice(2)}
+              </h2>
+            )
+          }
+
+          // Bullet points
+          if (
+            trimmedLine.startsWith('- ') ||
+            trimmedLine.startsWith('* ')
+          ) {
+            return (
+              <div
+                className="answer-list-item"
+                key={`bullet-${lineIndex}`}
+              >
+                <span className="answer-bullet">•</span>
+                <span>
+                  {trimmedLine.slice(2)}
+                </span>
+              </div>
+            )
+          }
+
+          // Numbered list
+          const numberedMatch =
+            trimmedLine.match(/^(\d+)\.\s+(.*)$/)
+
+          if (numberedMatch) {
+            return (
+              <div
+                className="answer-list-item"
+                key={`number-${lineIndex}`}
+              >
+                <span className="answer-number">
+                  {numberedMatch[1]}.
+                </span>
+                <span>
+                  {numberedMatch[2]}
+                </span>
+              </div>
+            )
+          }
+
+          // Normal paragraph
+          return (
+            <p key={`paragraph-${lineIndex}`}>
+              {trimmedLine}
+            </p>
+          )
+        })}
+      </div>
     )
   })
 }
+
 export default function App() {
   const [repositories, setRepositories] = useState([])
   const [activeRepositoryId, setActiveRepositoryId] = useState('')
