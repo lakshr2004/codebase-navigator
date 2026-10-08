@@ -29,6 +29,40 @@ const examples = [
   'How does authentication work in this project?',
 ]
 
+function renderAnswer(answer) {
+  if (!answer) {
+    return null
+  }
+
+  const parts = answer.split(/(```[\s\S]*?```)/g)
+
+  return parts.map((part, index) => {
+    if (part.startsWith('```') && part.endsWith('```')) {
+      const codeBlock = part
+        .replace(/^```[a-zA-Z0-9+#.-]*\s*/, '')
+        .replace(/```$/, '')
+        .trimEnd()
+
+      return (
+        <pre className="answer-code" key={index}>
+          <code>{codeBlock}</code>
+        </pre>
+      )
+    }
+
+    const text = part.trim()
+
+    if (!text) {
+      return null
+    }
+
+    return (
+      <p key={index}>
+        {text}
+      </p>
+    )
+  })
+}
 export default function App() {
   const [repositories, setRepositories] = useState([])
   const [activeRepositoryId, setActiveRepositoryId] = useState('')
@@ -746,13 +780,19 @@ export default function App() {
           {result && (
             <div className="results-layout">
               <article className="answer-panel">
-                <div className="answer-label">
-                  <Sparkles size={15} />
-                  GROUNDED RESPONSE
-                </div>
-                <p>{result.answer}</p>
-                <div className="answer-query">QUERY / {result.query}</div>
-              </article>
+  <div className="answer-label">
+    <Sparkles size={15} />
+    GROUNDED RESPONSE
+  </div>
+
+  <div className="answer-content">
+    {renderAnswer(result.answer)}
+  </div>
+
+  <div className="answer-query">
+    QUERY / {result.query}
+  </div>
+</article>
 
               <div className="sources-list">
                 {result.sources?.length ? (

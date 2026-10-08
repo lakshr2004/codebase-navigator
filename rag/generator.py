@@ -228,7 +228,7 @@ client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY and get_app_env() != "test" 
 
 MODEL_NAME = "openai/gpt-oss-20b"
 
-MAX_CONTEXT_CHARS = 10000
+MAX_CONTEXT_CHARS = 16000
 MAX_QUERY_CHARS = 1000
 MAX_HISTORY_CHARS = 1500
 MAX_OUTPUT_TOKENS = 1024

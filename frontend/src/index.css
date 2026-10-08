@@ -1478,3 +1478,139 @@ textarea:focus-visible {
     flex-direction: column;
   }
 }
+/* ============================================================
+   ANSWER CONTENT
+   ============================================================ */
+
+.answer-content {
+  width: 100%;
+  min-width: 0;
+}
+
+.answer-text {
+  white-space: pre-wrap;
+  line-height: 1.7;
+  margin-bottom: 18px;
+}
+
+.answer-text:last-child {
+  margin-bottom: 0;
+}
+
+
+/* ============================================================
+   CODE VIEWER
+   ============================================================ */
+
+.code-viewer {
+  width: 100%;
+  margin: 18px 0;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: #080c0b;
+  overflow: hidden;
+  border-radius: 6px;
+}
+
+.code-viewer-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 9px 13px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.025);
+}
+
+.code-file-type {
+  font-family: monospace;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: #b7ff45;
+}
+
+.code-viewer-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: rgba(255, 255, 255, 0.42);
+}
+
+.code-viewer-body {
+  overflow-x: auto;
+  overflow-y: auto;
+  max-height: 650px;
+  padding: 10px 0;
+  font-family: "JetBrains Mono", "Fira Code", Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.65;
+}
+
+.code-line {
+  display: flex;
+  min-width: max-content;
+}
+
+.code-line-number {
+  width: 48px;
+  min-width: 48px;
+  padding-right: 14px;
+  text-align: right;
+  user-select: none;
+  color: rgba(255, 255, 255, 0.25);
+  border-right: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.code-line-content {
+  padding-left: 16px;
+  padding-right: 24px;
+  color: rgba(255, 255, 255, 0.88);
+  white-space: pre;
+}
+
+
+/* ============================================================
+   MOBILE
+   ============================================================ */
+
+@media (max-width: 700px) {
+  .code-viewer-body {
+    font-size: 11px;
+  }
+
+  .code-line-number {
+    width: 38px;
+    min-width: 38px;
+    padding-right: 9px;
+  }
+
+  .code-line-content {
+    padding-left: 12px;
+    padding-right: 18px;
+  }
+}
+.answer-content {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.answer-content p {
+  margin: 0;
+}
+
+.answer-code {
+  margin: 0;
+  padding: 16px;
+  overflow-x: auto;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  background: #080d0b;
+}
+
+.answer-code code {
+  display: block;
+  font-family: 'JetBrains Mono', 'Fira Code', Consolas, monospace;
+  font-size: 13px;
+  line-height: 1.65;
+  white-space: pre;
+}
