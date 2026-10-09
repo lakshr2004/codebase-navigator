@@ -2324,18 +2324,17 @@ def _read_source_evidence(
         "content": content,
     }
 
+
 def build_context(
     results,
     repository_path: str
 ):
     """
-    Build grounded LLM context from CURRENT repository source lines.
-
-    Retrieved vector payload content is treated as untrusted metadata. Each
-    result is resolved back to the current repository before it can become
-    evidence. Evidence IDs are assigned only after validation, so the IDs
-    remain stable for the generation/citation contract.
+    Build grounded LLM context from current repository source lines.
+    Include only complete evidence blocks within the generator's context budget.
     """
+    from rag.generator import MAX_CONTEXT_CHARS
+
     context_parts = []
     sources = []
     current_size = 0
@@ -2343,15 +2342,16 @@ def build_context(
     for result in results:
         payload = getattr(result, "payload", None) or {}
         metadata = payload.get("metadata") or {}
+
         file_path = (
             metadata.get("relative_path")
             or metadata.get("file_path")
             or ""
         )
-        file_name = os.path.basename(str(file_path).replace("\\", "/")).lower()
+        file_name = os.path.basename(
+            str(file_path).replace("\\", "/")
+        ).lower()
 
-        # Lockfiles are intentionally ignored, not treated as a fatal
-        # retrieval error. Evidence IDs are assigned after this filter.
         if file_name in LOCKFILE_NAMES:
             continue
 
@@ -2360,9 +2360,7 @@ def build_context(
             repository_path,
         )
 
-        # A single invalid retrieved result makes the semantic result unsafe.
-        # This prevents stale, cross-repository, or traversal metadata from
-        # being silently replaced by unrelated evidence.
+        # Preserve the existing safety rule for invalid evidence.
         if evidence is None:
             return "", []
 
@@ -2377,17 +2375,13 @@ def build_context(
             f"{evidence['content']}\n\n"
         )
 
-        remaining = MAX_CONTEXT_CHARS - current_size
-        if remaining <= 0:
-            break
-
-        if len(block) > remaining:
-            if remaining < 500:
-                break
-            block = block[:remaining]
+        # Do not truncate code blocks: skip blocks that do not fit.
+        separator_size = 1 if context_parts else 0
+        if current_size + separator_size + len(block) > MAX_CONTEXT_CHARS:
+            continue
 
         context_parts.append(block)
-        current_size += len(block)
+        current_size += separator_size + len(block)
 
         sources.append({
             "evidence_id": evidence_id,
