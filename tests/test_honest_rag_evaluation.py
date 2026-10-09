@@ -372,3 +372,92 @@ def test_generator_does_not_truncate_context_away_from_its_source_catalog(
     )
 
     assert result == {"answer": REFUSAL, "evidence_ids": []}
+
+
+def test_search_code_prioritizes_booking_creation_chunk(
+    monkeypatch: pytest.MonkeyPatch,
+    repository: Path,
+) -> None:
+    """Exercise the real search_code ranking with mocked Qdrant results."""
+    from types import SimpleNamespace
+
+    from rag import embeddings, vector_store
+
+    booking_chunk = SimpleNamespace(
+        score=0.55,
+        payload={
+            "content": (
+                "booking = await Booking.create({\n"
+                '    payment_status: "pending",\n'
+                "    totalPrice: calculatedTotalAmount,\n"
+                "});"
+            ),
+            "metadata": {
+                "relative_path": (
+                    "backend/controllers/paymentController.js"
+                ),
+                "start_line": 108,
+                "end_line": 119,
+            },
+        },
+    )
+
+    unrelated_chunk = SimpleNamespace(
+        score=0.70,
+        payload={
+            "content": "const booking = await Booking.findById(id);",
+            "metadata": {
+                "relative_path": "backend/models/Booking.js",
+                "start_line": 1,
+                "end_line": 10,
+            },
+        },
+    )
+
+    class FakeClient:
+        def collection_exists(self, collection_name):
+            return True
+
+        def query_points(self, **kwargs):
+            return SimpleNamespace(
+                points=[unrelated_chunk, booking_chunk]
+            )
+
+    monkeypatch.setattr(vector_store, "client", FakeClient())
+    monkeypatch.setattr(
+        vector_store,
+        "get_collection_name",
+        lambda path: "test_collection",
+    )
+    monkeypatch.setattr(
+        embeddings,
+        "generate_embedding",
+        lambda query: [0.1, 0.2],
+    )
+    monkeypatch.setattr(
+        search,
+        "keyword_matches",
+        lambda query, result: 0,
+    )
+    monkeypatch.setattr(
+        search,
+        "content_match_score",
+        lambda query, result: 0,
+    )
+    monkeypatch.setattr(
+        search,
+        "_lexical_results_as_objects",
+        lambda *args, **kwargs: [],
+    )
+
+    results = search.search_code(
+        query="How is a booking created and saved to the database?",
+        repository_path=str(repository),
+        limit=5,
+    )
+
+    assert results
+    assert results[0].payload["metadata"]["relative_path"] == (
+        "backend/controllers/paymentController.js"
+    )
+    assert "Booking.create(" in results[0].payload["content"]
