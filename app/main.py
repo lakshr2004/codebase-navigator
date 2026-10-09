@@ -1,17 +1,17 @@
+
+from pathlib import Path
+
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from core.config import validate_runtime_config
-
 from services.repository_service import (
     get_supported_repositories,
     get_repository_path,
     index_local_repository,
 )
-
 from retrieval.search import answer_query
-
 from api.conversation import (
     get_history,
     add_message,
@@ -142,11 +142,7 @@ def readiness():
 )
 def get_repositories():
     """
-    Return only the supported local repositories.
-
-    Currently:
-        - Monetrik
-        - TicketPeChalo.in
+    Return the supported local repositories.
     """
 
     try:
@@ -161,21 +157,13 @@ def get_repositories():
         )
 
 
-# ------------------------------------------------------------
-# Optional GitHub loading route
-# ------------------------------------------------------------
-
-
 @app.post(
     "/repositories/load",
     response_model=RepositoryResponse,
 )
 def load_repository(request: RepositoryRequest):
     """
-    This endpoint is kept for compatibility.
-
-    The current application workflow is focused on the two
-    local repositories returned by /repositories.
+    Kept for compatibility with the existing API.
     """
 
     repo_url = request.repo_url.strip()
@@ -194,6 +182,137 @@ def load_repository(request: RepositoryRequest):
             "from /repositories instead."
         ),
     )
+
+
+# ============================================================
+# SOURCE CODE VIEWER
+# ============================================================
+
+
+@app.get("/repositories/{repository_id}/source")
+def get_repository_source(
+    repository_id: str,
+    file: str,
+    start_line: int = 1,
+    end_line: int | None = None,
+):
+    """
+    Return a bounded source-code excerpt from a supported repository.
+
+    The requested file must remain inside the selected repository.
+    By default, up to 80 lines are returned.
+    """
+
+    repository_id = repository_id.strip()
+
+    if not repository_id:
+        raise HTTPException(
+            status_code=400,
+            detail="Repository ID cannot be empty",
+        )
+
+    if not file.strip():
+        raise HTTPException(
+            status_code=400,
+            detail="File path cannot be empty",
+        )
+
+    if start_line < 1:
+        raise HTTPException(
+            status_code=400,
+            detail="start_line must be at least 1",
+        )
+
+    if end_line is not None and end_line < start_line:
+        raise HTTPException(
+            status_code=400,
+            detail="end_line must be greater than or equal to start_line",
+        )
+
+    if end_line is not None and end_line - start_line > 500:
+        raise HTTPException(
+            status_code=400,
+            detail="Requested source range is too large",
+        )
+
+    try:
+        repository_path = get_repository_path(repository_id)
+
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail=str(exc),
+        )
+
+    if not repository_path:
+        raise HTTPException(
+            status_code=404,
+            detail="Repository not found",
+        )
+
+    repo_root = Path(repository_path).resolve()
+    requested_path = Path(file)
+
+    if requested_path.is_absolute():
+        raise HTTPException(
+            status_code=400,
+            detail="Absolute file paths are not allowed",
+        )
+
+    resolved_path = (repo_root / requested_path).resolve()
+
+    # Prevent path traversal, including paths escaping via symlinks.
+    try:
+        resolved_path.relative_to(repo_root)
+
+    except ValueError:
+        raise HTTPException(
+            status_code=400,
+            detail="File must be inside the selected repository",
+        )
+
+    if not resolved_path.is_file():
+        raise HTTPException(
+            status_code=404,
+            detail="Source file not found",
+        )
+
+    try:
+        lines = resolved_path.read_text(
+            encoding="utf-8",
+            errors="replace",
+        ).splitlines()
+
+    except OSError as exc:
+        print("Source file read error:", exc)
+
+        raise HTTPException(
+            status_code=500,
+            detail="Could not read source file",
+        ) from exc
+
+    if start_line > len(lines):
+        raise HTTPException(
+            status_code=416,
+            detail="start_line exceeds the file length",
+        )
+
+    # Return at most 80 lines by default, or the requested range.
+    requested_end = (
+        end_line
+        if end_line is not None
+        else start_line + 79
+    )
+
+    actual_end = min(requested_end, len(lines))
+
+    return {
+        "file": resolved_path.relative_to(repo_root).as_posix(),
+        "start_line": start_line,
+        "end_line": actual_end,
+        "total_lines": len(lines),
+        "content": "\n".join(lines[start_line - 1:actual_end]),
+    }
 
 
 # ============================================================
@@ -216,9 +335,7 @@ def index_repository_route(repository_id: str):
         )
 
     try:
-        result = index_local_repository(
-            repository_id
-        )
+        result = index_local_repository(repository_id)
 
         return {
             "message": "Repository indexed successfully",
@@ -238,10 +355,7 @@ def index_repository_route(repository_id: str):
         )
 
     except Exception as exc:
-        print(
-            "Repository indexing error:",
-            exc,
-        )
+        print("Repository indexing error:", exc)
 
         raise HTTPException(
             status_code=500,
@@ -261,21 +375,7 @@ def index_repository_route(repository_id: str):
 def ask(request: QueryRequest):
     """
     Ask a question against the selected repository.
-
-    Frontend sends:
-        repository_id
-        session_id
-        mode
-
-    Backend resolves:
-        repository_id -> local repository path
-
-    Then retrieval is performed against that repository.
     """
-
-    # --------------------------------------------------------
-    # Validate query
-    # --------------------------------------------------------
 
     query = request.query.strip()
 
@@ -285,10 +385,6 @@ def ask(request: QueryRequest):
             detail="Query cannot be empty",
         )
 
-    # --------------------------------------------------------
-    # Validate repository ID
-    # --------------------------------------------------------
-
     repository_id = request.repository_id.strip()
 
     if not repository_id:
@@ -297,10 +393,6 @@ def ask(request: QueryRequest):
             detail="Repository ID cannot be empty",
         )
 
-    # --------------------------------------------------------
-    # Validate session ID
-    # --------------------------------------------------------
-
     session_id = request.session_id.strip()
 
     if not session_id:
@@ -308,10 +400,6 @@ def ask(request: QueryRequest):
             status_code=400,
             detail="Session ID cannot be empty",
         )
-
-    # --------------------------------------------------------
-    # Validate query mode
-    # --------------------------------------------------------
 
     mode = request.mode.strip().lower()
 
@@ -325,40 +413,21 @@ def ask(request: QueryRequest):
         )
 
     try:
-
-        # ----------------------------------------------------
-        # 1. Resolve repository ID -> local path
-        # ----------------------------------------------------
-
-        repository_path = get_repository_path(
-            repository_id
-        )
+        # 1. Resolve repository ID to its local path.
+        repository_path = get_repository_path(repository_id)
 
         if not repository_path:
             raise HTTPException(
                 status_code=404,
-                detail=(
-                    f"Repository not found: "
-                    f"{repository_id}"
-                ),
+                detail=f"Repository not found: {repository_id}",
             )
 
-        # ----------------------------------------------------
-        # 2. Get previous conversation
-        # ----------------------------------------------------
-
+        # 2. Load the existing conversation context.
         conversation_context = build_conversation_context(
             session_id
         )
 
-        # ----------------------------------------------------
-        # 3. Retrieve + generate answer
-        # ----------------------------------------------------
-        # Keep the current question separate from conversation history.
-        # Retrieval should search the repository for the actual question,
-        # while the history is available to the retrieval layer only when
-        # it is useful for resolving follow-up questions.
-
+        # 3. Retrieve relevant code and generate an answer.
         result = answer_query(
             query=query,
             repository_path=repository_path,
@@ -366,19 +435,12 @@ def ask(request: QueryRequest):
             conversation_context=conversation_context,
         )
 
-        # ----------------------------------------------------
-        # 5. Save user message
-        # ----------------------------------------------------
-
+        # 4. Save both messages.
         add_message(
             session_id=session_id,
             role="user",
             content=query,
         )
-
-        # ----------------------------------------------------
-        # 6. Save assistant response
-        # ----------------------------------------------------
 
         add_message(
             session_id=session_id,
@@ -386,10 +448,7 @@ def ask(request: QueryRequest):
             content=result["answer"],
         )
 
-        # ----------------------------------------------------
-        # 7. Return response
-        # ----------------------------------------------------
-
+        # 5. Return the response.
         return {
             "query": query,
             "answer": result["answer"],
@@ -406,10 +465,7 @@ def ask(request: QueryRequest):
         )
 
     except Exception as exc:
-        print(
-            "Conversation error:",
-            exc,
-        )
+        print("Conversation error:", exc)
 
         raise HTTPException(
             status_code=500,
@@ -424,7 +480,6 @@ def ask(request: QueryRequest):
 
 @app.get("/conversations/{session_id}")
 def get_conversation(session_id: str):
-
     session_id = session_id.strip()
 
     if not session_id:
@@ -446,7 +501,6 @@ def get_conversation(session_id: str):
 
 @app.delete("/conversations/{session_id}")
 def delete_conversation(session_id: str):
-
     session_id = session_id.strip()
 
     if not session_id:

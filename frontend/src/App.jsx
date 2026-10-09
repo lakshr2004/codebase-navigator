@@ -215,6 +215,14 @@ export default function App() {
   const [error, setError] = useState('')
   const [backendState, setBackendState] = useState('loading')
   const [readyState, setReadyState] = useState('loading')
+  
+const [selectedSource, setSelectedSource] = useState(null)
+const [sourceCode, setSourceCode] = useState('')
+const [sourceViewerState, setSourceViewerState] = useState('idle')
+const [sourceViewerError, setSourceViewerError] = useState('')
+const [sourceCodeStartLine, setSourceCodeStartLine] = useState(1)
+const [sourceCodeTotalLines, setSourceCodeTotalLines] = useState(0)
+
 
 
   // ==========================================================
@@ -272,6 +280,52 @@ export default function App() {
     sessionId: SESSION_ID,
     setError,
   })
+
+  // ==========================================================
+  // SOURCE CODE VIEWER
+  // ==========================================================
+
+  const handleSourceClick = async (source) => {
+    if (!activeRepositoryId) {
+      setSelectedSource(source)
+      setSourceViewerError('Select a repository first.')
+      setSourceViewerState('error')
+      return
+    }
+
+    setSelectedSource(source)
+    setSourceCode('')
+    setSourceViewerError('')
+    setSourceViewerState('loading')
+
+    const startLine = Math.max(1, source.start_line || 1)
+
+    try {
+      const response = await api.repositorySource(
+        activeRepositoryId,
+        source.file,
+        startLine,
+        source.end_line ?? undefined
+      )
+
+      setSourceCode(response.content)
+      setSourceCodeStartLine(response.start_line)
+      setSourceCodeTotalLines(response.total_lines)
+      setSourceViewerState('success')
+    } catch (err) {
+      setSourceViewerError(
+        err.message || 'Unable to load this source file.'
+      )
+      setSourceViewerState('error')
+    }
+  }
+
+  const closeSourceViewer = () => {
+    setSelectedSource(null)
+    setSourceCode('')
+    setSourceViewerError('')
+    setSourceViewerState('idle')
+  }
 
 
   // ==========================================================
@@ -1090,34 +1144,25 @@ export default function App() {
                   SOURCES
               ================================================== */}
 
-              <div className="sources-list">
+              
+<div className="sources-list">
+  {result.sources?.length ? (
+    result.sources.map((source, index) => (
+      <SourceCard
+        source={source}
+        index={index}
+        key={`${source.file}-${index}`}
+        onClick={handleSourceClick}
+      />
+    ))
+  ) : (
+    <div className="empty-sources">
+      No source references returned
+      for this query.
+    </div>
+  )}
+</div>
 
-                {result.sources?.length ? (
-
-                  result.sources.map(
-                    (source, index) => (
-
-                      <SourceCard
-                        source={source}
-                        index={index}
-                        key={`${source.file}-${index}`}
-                      />
-
-                    )
-                  )
-
-                ) : (
-
-                  <div className="empty-sources">
-
-                    No source references returned
-                    for this query.
-
-                  </div>
-
-                )}
-
-              </div>
 
             </div>
 
@@ -1302,6 +1347,156 @@ export default function App() {
 
         </div>
 
+      )}
+
+      {/* ======================================================
+          SOURCE CODE VIEWER
+      ====================================================== */}
+
+      {selectedSource && (
+        <div
+          className="modal-overlay source-viewer-overlay"
+          onClick={closeSourceViewer}
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="source-viewer-title"
+        >
+          <div
+            className="modal-content source-viewer-modal"
+            onClick={(event) => event.stopPropagation()}
+            style={{
+              width: 'min(1100px, 94vw)',
+              maxWidth: '1100px',
+              maxHeight: '85vh',
+              display: 'flex',
+              flexDirection: 'column',
+              overflow: 'hidden',
+            }}
+          >
+            <div className="modal-header">
+              <div>
+                <span className="section-kicker">
+                  SOURCE INSPECTOR
+                </span>
+
+                <h3 id="source-viewer-title">
+                  {selectedSource.file}
+                </h3>
+
+                <p style={{ marginTop: '6px', fontSize: '12px' }}>
+                  {selectedSource.language || 'Source file'}
+                  {' · '}
+                  {sourceViewerState === 'success'
+                    ? `Lines ${sourceCodeStartLine}–${
+                        sourceCodeStartLine +
+                        Math.max(0, sourceCode.split('\n').length - 1)
+                      } of ${sourceCodeTotalLines}`
+                    : 'Repository source'}
+                </p>
+              </div>
+
+              <IconButton
+                onClick={closeSourceViewer}
+                label="Close source viewer"
+              >
+                <X size={18} />
+              </IconButton>
+            </div>
+
+            <div
+              style={{
+                overflow: 'auto',
+                minHeight: '200px',
+                background: '#10151d',
+                borderRadius: '8px',
+                marginTop: '16px',
+              }}
+            >
+              {sourceViewerState === 'loading' && (
+                <div style={{ padding: '24px' }}>
+                  <LoaderCircle className="spin" size={20} />
+                  <p>Loading source code...</p>
+                </div>
+              )}
+
+              {sourceViewerState === 'error' && (
+                <div
+                  role="alert"
+                  style={{
+                    padding: '24px',
+                    color: '#ff9b9b',
+                  }}
+                >
+                  {sourceViewerError}
+                </div>
+              )}
+
+              {sourceViewerState === 'success' && (
+                <pre
+                  style={{
+                    margin: 0,
+                    padding: '16px',
+                    color: '#e5e7eb',
+                    fontSize: '13px',
+                    lineHeight: 1.7,
+                    overflow: 'visible',
+                    whiteSpace: 'pre',
+                    fontFamily: 'monospace',
+                  }}
+                >
+                  {sourceCode.split('\n').map((line, index) => (
+                    <div
+                      key={index}
+                      style={{
+                        display: 'flex',
+                        minHeight: '22px',
+                      }}
+                    >
+                      <span
+                        style={{
+                          display: 'inline-block',
+                          width: '56px',
+                          flexShrink: 0,
+                          paddingRight: '16px',
+                          textAlign: 'right',
+                          color: '#778399',
+                          userSelect: 'none',
+                        }}
+                      >
+                        {sourceCodeStartLine + index}
+                      </span>
+
+                      <code
+                        style={{
+                          whiteSpace: 'pre',
+                          fontFamily: 'inherit',
+                        }}
+                      >
+                        {line || ' '}
+                      </code>
+                    </div>
+                  ))}
+                </pre>
+              )}
+            </div>
+
+            <div
+              style={{
+                display: 'flex',
+                justifyContent: 'flex-end',
+                marginTop: '16px',
+              }}
+            >
+              <button
+                type="button"
+                className="secondary-button"
+                onClick={closeSourceViewer}
+              >
+                Close viewer
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
     </div>

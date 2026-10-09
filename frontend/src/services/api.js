@@ -1,3 +1,4 @@
+
 const API_BASE_URL = (
   import.meta.env.VITE_API_BASE_URL ||
   'http://127.0.0.1:8000'
@@ -111,6 +112,30 @@ export const api = {
         mode,
       }),
     }),
+
+  // --------------------------------------------------
+  // Repository source code
+  // --------------------------------------------------
+
+  repositorySource: (
+    repositoryId,
+    file,
+    startLine = 1,
+    endLine
+  ) => {
+    const params = new URLSearchParams({
+      file,
+      start_line: String(startLine),
+    })
+
+    if (endLine != null) {
+      params.set('end_line', String(endLine))
+    }
+
+    return request(
+      `/repositories/${encodeURIComponent(repositoryId)}/source?${params}`
+    )
+  },
 
   // --------------------------------------------------
   // Conversation
