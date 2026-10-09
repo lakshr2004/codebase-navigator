@@ -393,141 +393,86 @@ def _extract_explicit_usages_candidates(
     return results
 
 
-def is_identifier_query(
-    query: str
-) -> bool:
+
+def is_identifier_query(query: str) -> bool:
     """
     Detect whether the query is an exact code-identifier search.
 
-    Identifier mode is used for:
-    - definition/location of a specific symbol
-    - implementation of a specific symbol
-    - usages/references of a specific symbol
-    - existence checks for a specific symbol
-    - explicit code-level searches
-
-    Conceptual questions such as:
-        "Where is the main component defined?"
-        "How does authentication work?"
-        "What is the database connection flow?"
-
-    must remain semantic queries unless they contain a clearly
-    code-like identifier.
+    Generic architecture and repository questions should use semantic
+    retrieval, while explicit code-symbol queries use identifier search.
     """
-
-    if not query:
+    if not query or not query.strip():
         return False
 
     query_lower = query.lower().strip()
 
-    # ========================================================
-    # 0. Repository structure/file queries are NOT identifier
-    #    queries.
-    # ========================================================
-
+    # Repository structure and file-listing queries use dedicated handlers.
     if is_repository_structure_query(query):
         return False
 
     if is_repository_file_query(query):
         return False
 
-    # ========================================================
-    # 1. Explicit existence queries
-    #
-    # Examples:
-    #   Does getRecordsBackup exist?
-    #   Does increaseScore exist?
-    #   Is AuthController present?
-    # ========================================================
+    # Generic architecture terms are not code identifiers by themselves.
+    # Example: "Where are API routes defined?"
+    generic_architecture_terms = {
+        "api",
+        "apis",
+        "route",
+        "routes",
+        "endpoint",
+        "endpoints",
+    }
 
+    query_words = set(re.findall(r"[a-zA-Z_$][a-zA-Z0-9_$]*", query_lower))
+
+    if (
+        "where are" in query_lower
+        and query_words.intersection(generic_architecture_terms)
+    ):
+        return False
+
+    # Explicit existence checks.
     existence_patterns = [
         r"\bdoes\s+[`'\"]?([A-Za-z_$][A-Za-z0-9_$]*)[`'\"]?\s+exist\b",
-
-        r"\bis\s+there\s+(?:a\s+|an\s+)?[`'\"]?"
-        r"([A-Za-z_$][A-Za-z0-9_$]*)[`'\"]?"
-        r"\s+(?:identifier|function|class|variable|symbol|component)\b",
-
-        r"\b(?:check\s+if|see\s+if)\s+[`'\"]?"
-        r"([A-Za-z_$][A-Za-z0-9_$]*)[`'\"]?"
-        r"\s+exists?\b",
+        r"\bis\s+there\s+(?:a\s+|an\s+)?[`'\"]?([A-Za-z_$][A-Za-z0-9_$]*)[`'\"]?\s+(?:identifier|function|class|variable|symbol|component)\b",
+        r"\b(?:check\s+if|see\s+if)\s+[`'\"]?([A-Za-z_$][A-Za-z0-9_$]*)[`'\"]?\s+exists?\b",
     ]
 
     for pattern in existence_patterns:
-        match = re.search(
-            pattern,
-            query_lower
-        )
+        match = re.search(pattern, query_lower)
+        if match and is_code_like(match.group(1)):
+            return True
 
-        if match:
-            candidate = match.group(1)
-
-            if is_code_like(candidate):
-                return True
-
-    # ========================================================
-    # 2. Explicit type-keyword queries
-    #
-    # Examples:
-    #   function loginUser
-    #   class AuthController
-    #   component Dashboard
-    #   const API_URL
-    # ========================================================
-
-    explicit_type_candidates = (
-        _extract_explicit_type_keyword_candidates(query)
-    )
-
-    if explicit_type_candidates:
+    # Explicitly named code declarations, e.g. "function loginUser".
+    if _extract_explicit_type_keyword_candidates(query):
         return True
 
-    # ========================================================
-    # 3. Explicit usages/reference queries
-    #
-    # Examples:
-    #   find all usages of saveTransaction
-    #   find references to AuthController
-    #   usages of loginUser
-    # ========================================================
-
-    explicit_usage_candidates = (
-        _extract_explicit_usages_candidates(query)
-    )
-
-    if explicit_usage_candidates:
+    # Explicit usage/reference requests.
+    if _extract_explicit_usages_candidates(query):
         return True
 
-    # ========================================================
-    # 4. Backtick / quote enclosed identifiers
-    #
-    # Examples:
-    #   Where is `AuthController` defined?
-    #   find `loginUser`
-    # ========================================================
-
+    # Quoted or backtick-enclosed identifiers are explicit.
     enclosed_candidates = re.findall(
         r"[`'\"]([A-Za-z_$][A-Za-z0-9_$]*)[`'\"]",
-        query
+        query,
     )
 
     if enclosed_candidates:
         return True
 
-    # ========================================================
-    # 5. Conceptual question detection
-    #
-    # These normally belong to semantic RAG.
-    # ========================================================
-
+    # Conceptual questions should normally use semantic retrieval.
     conceptual_markers = [
         "how does",
         "how do",
         "how to",
         "how is",
+        "how are",
         "how can",
         "why does",
         "why is",
         "why do",
+        "why are",
         "does this",
         "does the",
         "is there",
@@ -550,51 +495,28 @@ def is_identifier_query(
         for marker in conceptual_markers
     )
 
-    # ========================================================
-    # 6. If conceptual, only allow identifier mode when the
-    #    query explicitly contains definition/usage/reference
-    #    intent AND a code-like candidate.
-    # ========================================================
-
     if is_conceptual:
-
         has_explicit_identifier_intent = bool(
             re.search(
                 r"\b(?:"
-                r"where\s+is|"
-                r"where\s+are|"
-                r"defined|"
-                r"definition|"
-                r"declare|"
-                r"declared|"
-                r"declaration|"
-                r"implemented|"
-                r"implementation|"
-                r"find\s+all\s+usages?|"
-                r"find\s+usages?|"
-                r"find\s+all\s+references?|"
+                r"where\s+is|where\s+are|defined|definition|"
+                r"declare|declared|declaration|implemented|"
+                r"implementation|find\s+all\s+usages?|"
+                r"find\s+usages?|find\s+all\s+references?|"
                 r"references?\s+to"
                 r")\b",
-                query_lower
+                query_lower,
             )
         )
 
         if not has_explicit_identifier_intent:
             return False
 
-        candidates = extract_identifier_candidates(
-            query
-        )
+        candidates = extract_identifier_candidates(query)
 
-        return any(
-            is_code_like(candidate)
-            for candidate in candidates
-        )
+        return any(is_code_like(candidate) for candidate in candidates)
 
-    # ========================================================
-    # 7. Non-conceptual identifier trigger keywords
-    # ========================================================
-
+    # Non-conceptual identifier search requires an explicit search intent.
     identifier_trigger_patterns = [
         "defined",
         "definition",
@@ -637,31 +559,12 @@ def is_identifier_query(
     if not has_trigger:
         return False
 
-    # ========================================================
-    # 8. Final CODE-LIKENESS GATE
-    #
-    # This is the most important protection against:
-    #
-    #   "Where is the main component defined?"
-    #
-    # being treated as:
-    #
-    #   identifier = "main"
-    #
-    # Only structurally code-like candidates are accepted.
-    # ========================================================
-
-    candidates = extract_identifier_candidates(
-        query
-    )
+    candidates = extract_identifier_candidates(query)
 
     if not candidates:
         return False
 
-    return any(
-        is_code_like(candidate)
-        for candidate in candidates
-    )
+    return any(is_code_like(candidate) for candidate in candidates)
 
 def detect_identifier_intent(query: str) -> str:
     """
