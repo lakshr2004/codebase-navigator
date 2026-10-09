@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 
 import { useRepositories } from './hooks/useRepositories'
 import { useQuery } from './hooks/useQuery'
@@ -223,7 +223,11 @@ const [sourceViewerError, setSourceViewerError] = useState('')
 const [sourceCodeStartLine, setSourceCodeStartLine] = useState(1)
 const [sourceCodeTotalLines, setSourceCodeTotalLines] = useState(0)
 
+  // ==========================================================
+  // QUERY RESET REF
+  // ==========================================================
 
+  const resetQueryStateRef = useRef(() => {})
 
   // ==========================================================
   // REPOSITORY HOOK
@@ -243,7 +247,6 @@ const [sourceCodeTotalLines, setSourceCodeTotalLines] = useState(0)
     setShowRepoSelector,
 
     repoSelectionError,
-
     historyLoading,
 
     handleRepositorySelect,
@@ -251,11 +254,8 @@ const [sourceCodeTotalLines, setSourceCodeTotalLines] = useState(0)
     handleClearActiveRepo,
   } = useRepositories({
     setError,
-    setResult: () => {},
-    setQuery: () => {},
-    setQueryState: () => {},
+    resetQueryState: () => resetQueryStateRef.current(),
   })
-
 
   // ==========================================================
   // QUERY HOOK
@@ -269,8 +269,10 @@ const [sourceCodeTotalLines, setSourceCodeTotalLines] = useState(0)
     setMode,
 
     result,
+    setResult,
 
     queryState,
+    setQueryState,
 
     handleQuery,
     handleClearConversation,
@@ -282,8 +284,20 @@ const [sourceCodeTotalLines, setSourceCodeTotalLines] = useState(0)
   })
 
   // ==========================================================
+  // CONNECT QUERY RESET CALLBACK
+  // ==========================================================
+
+  resetQueryStateRef.current = () => {
+    setResult(null)
+    setQuery('')
+    setQueryState('idle')
+  }
+
+  // ==========================================================
   // SOURCE CODE VIEWER
   // ==========================================================
+
+  
 
   const handleSourceClick = async (source) => {
     if (!activeRepositoryId) {
