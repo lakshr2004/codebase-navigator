@@ -298,14 +298,30 @@ const [sourceCodeTotalLines, setSourceCodeTotalLines] = useState(0)
     setSourceViewerError('')
     setSourceViewerState('loading')
 
-    const startLine = Math.max(1, source.start_line || 1)
+    const evidenceStart = Math.max(
+      1,
+      Number(source.start_line) || 1
+    )
+
+    const evidenceEnd = Math.max(
+      evidenceStart,
+      Number(source.end_line) || evidenceStart
+    )
+
+    // Expand the evidence range to include surrounding context.
+    // The backend limits each response to at most 80 lines.
+    const contextStart = Math.max(1, evidenceStart - 10)
+    const contextEnd = Math.min(
+      Math.max(evidenceEnd + 10, contextStart),
+      contextStart + 79
+    )
 
     try {
       const response = await api.repositorySource(
         activeRepositoryId,
         source.file,
-        startLine,
-        source.end_line ?? undefined
+        contextStart,
+        contextEnd
       )
 
       setSourceCode(response.content)
@@ -1444,38 +1460,59 @@ const [sourceCodeTotalLines, setSourceCodeTotalLines] = useState(0)
                     fontFamily: 'monospace',
                   }}
                 >
-                  {sourceCode.split('\n').map((line, index) => (
-                    <div
-                      key={index}
-                      style={{
-                        display: 'flex',
-                        minHeight: '22px',
-                      }}
-                    >
-                      <span
-                        style={{
-                          display: 'inline-block',
-                          width: '56px',
-                          flexShrink: 0,
-                          paddingRight: '16px',
-                          textAlign: 'right',
-                          color: '#778399',
-                          userSelect: 'none',
-                        }}
-                      >
-                        {sourceCodeStartLine + index}
-                      </span>
+                  {sourceCode.split('\n').map((line, index) => {
+                    const lineNumber = sourceCodeStartLine + index
+                    const evidenceStart = Math.max(
+                      1,
+                      Number(selectedSource.start_line) || 1
+                    )
+                    const evidenceEnd = Math.max(
+                      evidenceStart,
+                      Number(selectedSource.end_line) || evidenceStart
+                    )
+                    const isEvidenceLine =
+                      lineNumber >= evidenceStart &&
+                      lineNumber <= evidenceEnd
 
-                      <code
+                    return (
+                      <div
+                        key={lineNumber}
                         style={{
-                          whiteSpace: 'pre',
-                          fontFamily: 'inherit',
+                          display: 'flex',
+                          minHeight: '22px',
+                          background: isEvidenceLine
+                            ? 'rgba(234, 179, 8, 0.12)'
+                            : 'transparent',
+                          borderLeft: isEvidenceLine
+                            ? '3px solid #eab308'
+                            : '3px solid transparent',
                         }}
                       >
-                        {line || ' '}
-                      </code>
-                    </div>
-                  ))}
+                        <span
+                          style={{
+                            display: 'inline-block',
+                            width: '56px',
+                            flexShrink: 0,
+                            paddingRight: '16px',
+                            textAlign: 'right',
+                            color: isEvidenceLine ? '#facc15' : '#778399',
+                            userSelect: 'none',
+                          }}
+                        >
+                          {lineNumber}
+                        </span>
+
+                        <code
+                          style={{
+                            whiteSpace: 'pre',
+                            fontFamily: 'inherit',
+                          }}
+                        >
+                          {line || ' '}
+                        </code>
+                      </div>
+                    )
+                  })}
                 </pre>
               )}
             </div>
