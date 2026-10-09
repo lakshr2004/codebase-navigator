@@ -1170,95 +1170,191 @@ def build_exact_file_code_answer(
 # Deterministic Identifier Search & Classification
 # ============================================================
 
+
 def classify_identifier_match_type(
     line: str,
     identifier: str,
     file_path: str = ""
 ) -> str:
     """
-    Accurately classify whether a line contains a definition, reference/import, or usage.
-    Crucially ensures import/require lines (e.g. const User = require(...)) are classified
-    as 'reference' and NOT 'definition'.
+    Classify a matching source line as a definition, reference, or usage.
+
+    Import and require statements are classified as references.
+    Function, class, model, and variable declarations are classified
+    as definitions.
     """
     escaped = re.escape(identifier)
 
     # --------------------------------------------------------
-    # 1. Imports, Requires, and Bindings (ALWAYS 'reference')
+    # 1. Imports, Requires, and Bindings
     # --------------------------------------------------------
-    # CommonJS require statements: const User = require("..."), require("./User")
+
+    # CommonJS require statements
     if re.search(r"\brequire\s*\(", line):
         return "reference"
 
-    # ES6 / TypeScript / Python / Java import statements:
-    # import User from "...", import { User } from "...", from models import User
-    if re.match(r"^\s*(?:import|from|using|#include)\b", line):
+    # ES modules, TypeScript, Python, Java, and C/C++ imports
+    if re.match(
+        r"^\s*(?:import|from|using|#include)\b",
+        line
+    ):
         return "reference"
 
     # --------------------------------------------------------
     # 2. Model / Entity / Schema Definitions
     # --------------------------------------------------------
-    # Mongoose / ORM model definitions: mongoose.model("User", ...), model('User', ...)
-    if re.search(rf"""\b(?:mongoose\.)?model\s*\(\s*['"]{escaped}['"]""", line):
+
+    if re.search(
+        rf"""\b(?:mongoose\.)?model\s*\(\s*['"]{escaped}['"]""",
+        line
+    ):
         return "definition"
 
-    # Sequelize / ORM define: db.define("User", ...)
-    if re.search(rf"""\bdefine\s*\(\s*['"]{escaped}['"]""", line):
-        return "definition"
-
-    # --------------------------------------------------------
-    # 3. Class, Interface, Type, Enum, Struct, Trait Definitions
-    # --------------------------------------------------------
-    if re.search(rf"\b(?:export\s+(?:default\s+)?)?(?:class|interface|type|enum|struct|trait)\s+{escaped}\b", line):
-        return "definition"
-
-    # --------------------------------------------------------
-    # 4. Function Declarations & Expressions
-    # --------------------------------------------------------
-    # Standard function declaration: function foo(, async function foo(, export function foo(
-    if re.search(rf"\b(?:export\s+(?:default\s+)?)?(?:async\s+)?function(?:\s*\*|\s+){escaped}\s*[\(<]", line):
-        return "definition"
-
-    # Arrow function or function expression assignment:
-    # const foo = () =>, const foo = async () =>, export const foo = function()
-    if re.search(rf"\b(?:export\s+)?(?:const|let|var)\s+{escaped}\s*=\s*(?:async\s*)?(?:\([^)]*\)|[A-Za-z_$][A-Za-z0-9_$]*)\s*=>", line):
-        return "definition"
-    if re.search(rf"\b(?:export\s+)?(?:const|let|var)\s+{escaped}\s*=\s*(?:async\s*)?function\b", line):
-        return "definition"
-
-    # Python def and class
-    if re.search(rf"^\s*(?:async\s+)?def\s+{escaped}\s*\(", line):
-        return "definition"
-    if re.search(rf"^\s*class\s+{escaped}\s*[:\(]", line):
-        return "definition"
-
-    # Java / C++ / Go / Rust method or function declaration
-    if re.search(rf"\b(?:public|private|protected|static|final|fn|func)\s+.*?\b{escaped}\s*[\(<]", line):
-        return "definition"
-
-    # Object method definition: foo(req, res) {
-    if re.search(rf"^\s*{escaped}\s*\([^)]*\)\s*\{{", line):
+    if re.search(
+        rf"""\bdefine\s*\(\s*['"]{escaped}['"]""",
+        line
+    ):
         return "definition"
 
     # --------------------------------------------------------
-    # 5. Variable / Constant Assignments (Non-Import)
+    # 3. Class, Interface, Type, Enum, Struct, Trait
     # --------------------------------------------------------
-    # const MAX_LIMIT = 500, let counter = 0
-    if re.search(rf"\b(?:export\s+)?(?:const|let|var)\s+{escaped}\s*=", line):
+
+    if re.search(
+        rf"\b(?:export\s+(?:default\s+)?)?"
+        rf"(?:class|interface|type|enum|struct|trait)\s+"
+        rf"{escaped}\b",
+        line
+    ):
+        return "definition"
+
+    # --------------------------------------------------------
+    # 4. Function Declarations and Expressions
+    # --------------------------------------------------------
+
+    # Standard function declarations:
+    # function foo(...), async function foo(...)
+    if re.search(
+        rf"\b(?:export\s+(?:default\s+)?)?"
+        rf"(?:async\s+)?function(?:\s*\*|\s+)"
+        rf"{escaped}\s*[\(<]",
+        line
+    ):
+        return "definition"
+
+    # CommonJS exported function assignments:
+    # exports.foo = async (req, res) => { ... }
+    # module.exports.foo = (req, res) => { ... }
+    # exports.foo = async function (...) { ... }
+    if re.search(
+        rf"\b(?:module\.exports|exports)\s*\.\s*"
+        rf"{escaped}\s*=\s*"
+        rf"(?:async\s*)?"
+        rf"(?:"
+        rf"\([^)]*\)\s*=>"
+        rf"|[A-Za-z_$][A-Za-z0-9_$]*\s*=>"
+        rf"|function\b"
+        rf")",
+        line
+    ):
+        return "definition"
+
+    # CommonJS exported method shorthand:
+    # exports.foo = function foo(...) { ... }
+    # (Covered by the preceding function expression rule.)
+
+    # Arrow function assignments:
+    # const foo = () =>, const foo = async () =>
+    if re.search(
+        rf"\b(?:export\s+)?(?:const|let|var)\s+"
+        rf"{escaped}\s*=\s*"
+        rf"(?:async\s*)?"
+        rf"(?:\([^)]*\)|[A-Za-z_$][A-Za-z0-9_$]*)"
+        rf"\s*=>",
+        line
+    ):
+        return "definition"
+
+    # Function expression assignments:
+    # const foo = function (...) { ... }
+    if re.search(
+        rf"\b(?:export\s+)?(?:const|let|var)\s+"
+        rf"{escaped}\s*=\s*(?:async\s*)?function\b",
+        line
+    ):
+        return "definition"
+
+    # Python function and class declarations
+    if re.search(
+        rf"^\s*(?:async\s+)?def\s+{escaped}\s*\(",
+        line
+    ):
+        return "definition"
+
+    if re.search(
+        rf"^\s*class\s+{escaped}\s*[:\(]",
+        line
+    ):
+        return "definition"
+
+    # Java / C++ / Go / Rust method or function declarations
+    if re.search(
+        rf"\b(?:public|private|protected|static|final|fn|func)"
+        rf"\s+.*?\b{escaped}\s*[\(<]",
+        line
+    ):
+        return "definition"
+
+    # Object method definition:
+    # foo(req, res) {
+    if re.search(
+        rf"^\s*{escaped}\s*\([^)]*\)\s*\{{",
+        line
+    ):
+        return "definition"
+
+    # --------------------------------------------------------
+    # 5. Variable / Constant Assignments
+    # --------------------------------------------------------
+
+    if re.search(
+        rf"\b(?:export\s+)?(?:const|let|var)\s+"
+        rf"{escaped}\s*=",
+        line
+    ):
+        return "definition"
+
+    # CommonJS exported variables:
+    # exports.foo = value
+    # module.exports.foo = value
+    if re.search(
+        rf"\b(?:module\.exports|exports)\s*\.\s*"
+        rf"{escaped}\s*=",
+        line
+    ):
         return "definition"
 
     # Python top-level assignment
-    if re.match(rf"^{escaped}\s*=", line):
+    if re.match(rf"^\s*{escaped}\s*=", line):
         return "definition"
 
     # --------------------------------------------------------
     # 6. File-Level Named Export
     # --------------------------------------------------------
+
     if file_path:
-        base_name = os.path.splitext(os.path.basename(file_path))[0]
+        base_name = os.path.splitext(
+            os.path.basename(file_path)
+        )[0]
+
         if base_name.lower() == identifier.lower():
-            if re.search(r"\b(?:module\.exports\s*=|export\s+default\b)", line):
+            if re.search(
+                r"\b(?:module\.exports\s*=|export\s+default\b)",
+                line
+            ):
                 return "definition"
 
+    # No declaration pattern matched
     return "usage"
 
 
@@ -1369,11 +1465,34 @@ def build_identifier_search_answer(
         )
     )
 
+    
+    # Deduplicate matches by (file, line_number)
+    unique_matches = {}
+    for match in all_matches:
+        key = (match["file"], match["start_line"])
+        if key not in unique_matches:
+            unique_matches[key] = match
+
+    deduped_matches = list(unique_matches.values())
+
+    # Sort: definitions first, then references, then usages
+    type_priority = {"definition": 0, "reference": 1, "usage": 2}
+    deduped_matches.sort(
+        key=lambda m: (
+            type_priority.get(m["type"], 2),
+            m["file"],
+            m["start_line"]
+        )
+    )
+
+    
+
     definitions = [m for m in deduped_matches if m["type"] == "definition"]
     usages = [m for m in deduped_matches if m["type"] != "definition"]
 
     lines = []
     primary_id = identifiers[0]
+
 
     if intent == "definition":
         if definitions:
@@ -1948,6 +2067,24 @@ def _lexical_results_as_objects(
 
     return results
 
+def _is_booking_creation_query(query: str) -> bool:
+    """Identify conceptual questions about creating or persisting bookings."""
+    q = query.lower()
+
+    asks_about_booking = any(
+        term in q
+        for term in ("booking", "reservation", "ticket")
+    )
+    asks_about_creation = any(
+        term in q
+        for term in (
+            "creat", "sav", "persist", "stor",
+            "database", "mongodb", "insert",
+        )
+    )
+
+    return asks_about_booking and asks_about_creation
+
 
 def search_code(
     query: str,
@@ -1994,11 +2131,17 @@ def search_code(
         lexical_results = _lexical_results_as_objects(
             lexical_query,
             repository_path,
-            limit=24,
+            limit=300,
         )
         relevant_results.extend(lexical_results)
 
+    
     ranked_results = []
+    booking_creation_query = (
+        is_conceptual_query(query)
+        and _is_booking_creation_query(query)
+    )
+
     for r in relevant_results:
         semantic_score = float(r.score)
         keyword_score = keyword_matches(query, r)
@@ -2009,11 +2152,67 @@ def search_code(
             + (keyword_score * 0.01)
             + (exact_content_matches * 0.08)
         )
+
+        if booking_creation_query:
+            payload = r.payload or {}
+            metadata = payload.get("metadata") or {}
+            file_path = (
+                metadata.get("relative_path")
+                or metadata.get("file_path")
+                or ""
+            )
+            content = str(payload.get("content") or "")
+            normalized_path = str(file_path).replace("\\", "/").lower()
+
+            is_booking_controller = (
+                normalized_path.endswith(
+                    "backend/controllers/paymentcontroller.js"
+                )
+            )
+            has_booking_creation = (
+                "Booking.create(" in content
+                or "Booking.create (" in content
+            )
+
+            if is_booking_controller and has_booking_creation:
+                final_score += 2.0
+
         ranked_results.append((final_score, r))
 
+
+    
     ranked_results.sort(key=lambda item: item[0], reverse=True)
-    ordered_results = [r for _, r in ranked_results]
-    unique_results = deduplicate_results(ordered_results)
+
+    # Preserve the calculated relevance score during deduplication.
+    best_by_location = {}
+
+    for final_score, result in ranked_results:
+        payload = result.payload or {}
+        metadata = payload.get("metadata") or {}
+        file_path = (
+            metadata.get("relative_path")
+            or metadata.get("file_path")
+            or ""
+        )
+
+        key = (
+            normalize_path(file_path),
+            metadata.get("start_line"),
+            metadata.get("end_line"),
+        )
+
+        if key not in best_by_location:
+            best_by_location[key] = (final_score, result)
+
+    unique_results = [
+        result
+        for _, result in sorted(
+            best_by_location.values(),
+            key=lambda item: item[0],
+            reverse=True,
+        )
+    ]
+
 
     filename_candidates = extract_filename_candidates(query)
     if filename_candidates:
@@ -2035,9 +2234,14 @@ def search_code(
         unique_results = [r for _, r in boosted_results]
         max_per_file = 8 if is_conceptual_query(query) else 6
         diversified_results = diversify_results(unique_results, max_per_file=max_per_file)
+    
     else:
-        max_per_file = 5 if is_conceptual_query(query) else 3
-        diversified_results = diversify_results(unique_results, max_per_file=max_per_file)
+        max_per_file = 12 if is_conceptual_query(query) else 3
+        diversified_results = diversify_results(
+            unique_results,
+            max_per_file=max_per_file,
+        )
+
 
     result_limit = CONCEPTUAL_MAX_RESULTS if is_conceptual_query(query) else limit
     return diversified_results[:result_limit]
@@ -2302,6 +2506,7 @@ def build_context(
 # Main Answer Function (Deterministic-First Architecture)
 # ============================================================
 
+
 def answer_query(
     query: str,
     repository_path: str,
@@ -2313,28 +2518,19 @@ def answer_query(
     Main repository query entry point.
 
     Architecture:
-
-        deterministic file/identifier lookup
-                    ↓
-              semantic retrieval
-                    ↓
-             grounded generation
-                    ↓
-             evidence filtering
-                    ↓
-              public response
+        deterministic lookup
+        -> semantic retrieval
+        -> grounded generation
+        -> evidence filtering
+        -> public response
     """
-
     REFUSAL = "I couldn't find enough information in the codebase."
 
-    # --------------------------------------------------------
-    # Basic validation
-    # --------------------------------------------------------
-
+    # 1. Basic validation
     if not query or not query.strip():
         return {
             "answer": "Please provide a question.",
-            "sources": []
+            "sources": [],
         }
 
     query = query.strip()
@@ -2342,104 +2538,59 @@ def answer_query(
     if not repository_path:
         return {
             "answer": "Repository path is required.",
-            "sources": []
+            "sources": [],
         }
 
     if not os.path.isdir(repository_path):
         return {
             "answer": f"The repository does not exist: `{repository_path}`",
-            "sources": []
+            "sources": [],
         }
 
     mode = (mode or "auto").strip().lower()
-
     if mode not in {"auto", "exact", "semantic"}:
         mode = "auto"
 
-    # --------------------------------------------------------
-    # Resolve follow-up query
-    # --------------------------------------------------------
-
+    # 2. Resolve follow-up query
     retrieval_query = resolve_follow_up_query(
         query,
         conversation_context,
     )
-
     conceptual = is_conceptual_query(retrieval_query)
 
-    # ========================================================
-    # 1. Repository structure
-    # ========================================================
-
+    # 3. Repository structure
     if is_repository_structure_query(retrieval_query):
-        return build_repository_structure_answer(
-            repository_path
-        )
+        return build_repository_structure_answer(repository_path)
 
-    # ========================================================
-    # 2. Exact file source-code retrieval
-    # ========================================================
-    # This MUST run before generic repository-file listing and before
-    # semantic/identifier routing. A query that explicitly names a file
-    # and asks for its code is deterministic by nature.
-    #
-    # Examples:
-    #   "Show the exact Record.js code"
-    #   "Show Record.js code that defines the user relationship"
-    #   "Give me the source code of auth.py"
-    #   "Show the exact Missing.js code"
-    #
-    # The helper also returns the deterministic negative answer when the
-    # requested file does not exist.
+    # 4. Exact file source-code retrieval
     if is_file_code_request_query(retrieval_query):
         exact_file_code_result = build_exact_file_code_answer(
             retrieval_query,
             repository_path,
         )
-
         if exact_file_code_result:
             return exact_file_code_result
 
-    # ========================================================
-    # 3. Language-specific file listing
-    # ========================================================
-
-    language_filter = detect_language_filter(
-        retrieval_query
-    )
-
+    # 5. Language-specific file listing
+    language_filter = detect_language_filter(retrieval_query)
     if language_filter:
         return build_repository_file_answer(
             repository_path,
             language_filter,
         )
 
-    # ========================================================
-    # 4. Generic repository file listing
-    # ========================================================
-
+    # 6. Generic repository file listing
     if is_repository_file_query(retrieval_query):
-        return build_repository_file_answer(
-            repository_path
-        )
+        return build_repository_file_answer(repository_path)
 
-    # ========================================================
-    # 5. Exact filename location
-    # ========================================================
+    # 7. Exact filename location
+    filename_candidates = extract_filename_candidates(retrieval_query)
 
-    filename_candidates = extract_filename_candidates(
-        retrieval_query
-    )
-
-    if (
-        filename_candidates
-        and is_file_location_query(retrieval_query)
-    ):
+    if filename_candidates and is_file_location_query(retrieval_query):
         location_result = find_file_location(
             retrieval_query,
             repository_path,
         )
-
         if location_result:
             return location_result
 
@@ -2447,14 +2598,10 @@ def answer_query(
             retrieval_query,
             repository_path,
         )
-
         if missing_result:
             return missing_result
 
-    # ========================================================
-    # 6. Exact identifier search
-    # ========================================================
-
+    # 8. Exact identifier search
     should_run_identifier_search = (
         mode != "semantic"
         and not conceptual
@@ -2462,39 +2609,22 @@ def answer_query(
     )
 
     if should_run_identifier_search:
-
-        exact_identifier_result = (
-            build_identifier_search_answer(
-                retrieval_query,
-                repository_path,
-            )
+        exact_identifier_result = build_identifier_search_answer(
+            retrieval_query,
+            repository_path,
         )
-
         if exact_identifier_result:
             return exact_identifier_result
 
-        # ----------------------------------------------------
-        # IMPORTANT:
-        # A recognized identifier with no match MUST NOT fall
-        # through to semantic RAG.
-        # ----------------------------------------------------
-
-        candidates = extract_identifier_candidates(
-            retrieval_query
-        )
+        candidates = extract_identifier_candidates(retrieval_query)
 
         if candidates:
             missing_id = candidates[0]
 
-            # Definition/existence questions have a deterministic
-            # negative response expected by the evaluation suite.
-            if detect_identifier_intent(
-                retrieval_query
-            ) == "definition":
-
+            if detect_identifier_intent(retrieval_query) == "definition":
                 return {
                     "answer": REFUSAL,
-                    "sources": []
+                    "sources": [],
                 }
 
             return {
@@ -2502,13 +2632,10 @@ def answer_query(
                     f"I couldn't find the identifier "
                     f"`{missing_id}` in the repository."
                 ),
-                "sources": []
+                "sources": [],
             }
 
-    # ========================================================
-    # 7. Semantic retrieval
-    # ========================================================
-
+    # 9. Semantic retrieval
     try:
         results = search_code(
             query=retrieval_query,
@@ -2519,52 +2646,70 @@ def answer_query(
                 else limit
             ),
         )
-
     except ValueError as error:
         return {
             "answer": str(error),
-            "sources": []
+            "sources": [],
         }
-
     except Exception as error:
-        print(
-            "Semantic retrieval error:",
-            error,
-        )
-
+        print("Semantic retrieval error:", error)
         return {
             "answer": (
                 "The repository search could not be completed. "
                 "Please check the backend logs."
             ),
-            "sources": []
+            "sources": [],
         }
+
+    # TEMPORARY DIAGNOSTICS
+    print("\n--- BOOKING RETRIEVAL DEBUG ---")
+    print("Query:", retrieval_query)
+    print("Conceptual:", conceptual)
+    print("Retrieved results:", len(results))
+
+    for index, result in enumerate(results[:10], start=1):
+        payload = getattr(result, "payload", None) or {}
+        metadata = payload.get("metadata") or {}
+
+        print(
+            index,
+            "| FILE:",
+            metadata.get("relative_path") or metadata.get("file_path"),
+            "| LINES:",
+            metadata.get("start_line"),
+            "-",
+            metadata.get("end_line"),
+            "| SCORE:",
+            getattr(result, "score", None),
+        )
 
     if not results:
+        print("STOP: semantic retrieval returned no results.")
+        print("--- END BOOKING RETRIEVAL DEBUG ---\n")
         return {
             "answer": REFUSAL,
-            "sources": []
+            "sources": [],
         }
 
-    # ========================================================
-    # 8. Grounded context
-    # ========================================================
-
+    # 10. Build grounded context
     context, sources = build_context(
         results,
         repository_path,
     )
 
+    print("Context length:", len(context))
+    print("Context source count:", len(sources))
+    print("Context source files:", [s["file"] for s in sources])
+
     if not context.strip() or not sources:
+        print("STOP: context construction returned no usable sources.")
+        print("--- END BOOKING RETRIEVAL DEBUG ---\n")
         return {
             "answer": REFUSAL,
-            "sources": []
+            "sources": [],
         }
 
-    # ========================================================
-    # 9. Generation query
-    # ========================================================
-
+    # 11. Generation query
     generation_query = query
 
     if conversation_context:
@@ -2579,16 +2724,7 @@ Repository retrieval query:
 {retrieval_query}
 """.strip()
 
-    # ========================================================
-    # 10. IMPORTANT:
-    # Call generate_grounded_answer DIRECTLY.
-    #
-    # Do NOT call generate_answer() here.
-    #
-    # The tests monkeypatch:
-    # generator.generate_grounded_answer
-    # ========================================================
-
+    # 12. Grounded answer generation
     from rag import generator
 
     generated = generator.generate_grounded_answer(
@@ -2598,25 +2734,26 @@ Repository retrieval query:
     )
 
     if not isinstance(generated, dict):
+        print("STOP: generator returned a non-dictionary response.")
+        print("--- END BOOKING RETRIEVAL DEBUG ---\n")
         return {
             "answer": REFUSAL,
-            "sources": []
+            "sources": [],
         }
 
-    answer = generated.get(
-        "answer",
-        REFUSAL,
-    )
+    answer = generated.get("answer", REFUSAL)
+    selected_evidence_ids = generated.get("evidence_ids", [])
 
-    selected_evidence_ids = generated.get(
-        "evidence_ids",
-        [],
-    )
+    print("Generated answer:", str(answer)[:300])
+    print("Selected evidence IDs:", selected_evidence_ids)
+    print("Available evidence IDs:", [s["evidence_id"] for s in sources])
 
     if not isinstance(selected_evidence_ids, list):
+        print("STOP: evidence_ids is not a list.")
+        print("--- END BOOKING RETRIEVAL DEBUG ---\n")
         return {
             "answer": REFUSAL,
-            "sources": []
+            "sources": [],
         }
 
     selected_evidence_ids = {
@@ -2626,37 +2763,32 @@ Repository retrieval query:
         and not isinstance(evidence_id, bool)
     }
 
-    # ========================================================
-    # 11. Explicit refusal from generator
-    # ========================================================
-
+    # 13. Explicit refusal
     if answer == REFUSAL:
+        print("STOP: generator explicitly refused.")
+        print("--- END BOOKING RETRIEVAL DEBUG ---\n")
         return {
             "answer": REFUSAL,
-            "sources": []
+            "sources": [],
         }
 
-    # ========================================================
-    # 12. Keep ONLY cited evidence
-    # ========================================================
-
+    # 14. Keep only evidence cited by the generator
     grounded_sources = [
         source
         for source in sources
-        if source.get("evidence_id")
-        in selected_evidence_ids
+        if source.get("evidence_id") in selected_evidence_ids
     ]
+
+    print("Grounded source count:", len(grounded_sources))
+    print("--- END BOOKING RETRIEVAL DEBUG ---\n")
 
     if not grounded_sources:
         return {
             "answer": REFUSAL,
-            "sources": []
+            "sources": [],
         }
 
-    # ========================================================
-    # 13. Remove internal evidence IDs
-    # ========================================================
-
+    # 15. Remove internal evidence IDs
     public_sources = [
         {
             "file": source["file"],

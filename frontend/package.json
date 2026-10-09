@@ -10,16 +10,17 @@
     "test:e2e": "playwright test"
   },
   "dependencies": {
+    "@playwright/test": "latest",
     "@vitejs/plugin-react": "latest",
-    "vite": "latest",
+    "lucide-react": "latest",
+    "prism-react-renderer": "^2.4.1",
     "react": "latest",
     "react-dom": "latest",
-    "lucide-react": "latest",
-    "@playwright/test": "latest"
+    "vite": "latest"
   },
   "devDependencies": {
-    "tailwindcss": "^3.4.17",
+    "autoprefixer": "^10.4.20",
     "postcss": "^8.4.49",
-    "autoprefixer": "^10.4.20"
+    "tailwindcss": "^3.4.17"
   }
 }
